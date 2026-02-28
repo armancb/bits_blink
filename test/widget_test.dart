@@ -1,30 +1,40 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
 import 'package:bits_blink/main.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('Chat screen renders header and sample messages', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(const BitsBlinkApp());
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    // Header should show branding.
+    expect(find.text('BITSBlink'), findsOneWidget);
+    expect(find.text('OPTICAL MODEM INTERFACE'), findsOneWidget);
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+    // Sample messages should be visible.
+    expect(find.textContaining('Diver 2 here'), findsOneWidget);
+    expect(find.textContaining('Copy that'), findsOneWidget);
+    expect(find.textContaining('Crystal clear'), findsOneWidget);
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    // Telemetry HUD should render.
+    expect(find.text('TELEMETRY HUD'), findsOneWidget);
+
+    // Input field should be present.
+    expect(find.byType(TextField), findsOneWidget);
+  });
+
+  testWidgets('Sending a message appends it to the chat', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(const BitsBlinkApp());
+
+    // Type a message and tap send.
+    await tester.enterText(find.byType(TextField), 'Hello from Surface');
+    await tester.tap(find.byIcon(Icons.flash_on));
+    await tester.pumpAndSettle();
+
+    // The sent message should now be visible.
+    expect(find.text('Hello from Surface'), findsOneWidget);
   });
 }
