@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/message.dart';
-import '../services/encoder_service.dart';
+import '../services/four_ppm_service.dart';
 import '../widgets/app_header.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/message_input.dart';
@@ -15,6 +16,8 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  static const _modemChannel = MethodChannel('bitsblink/modem');
+
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
 
@@ -28,26 +31,45 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  /// Encodes and sends a message, updating the HUD as it goes.
-  void _handleSend(String text) {
+  /// Encodes, modulates, transmits via flashlight, and shows the message.
+  Future<void> _handleSend(String text) async {
     // Step 1: Show encoding-in-progress on HUD.
     setState(() {
       _hudEntries = [
         const HudEntry(tag: 'UTF8', text: 'Converting to binary...'),
         const HudEntry(tag: 'RS', text: 'Reed-Solomon encoding...'),
+        const HudEntry(tag: '4PPM', text: 'Modulating...'),
       ];
     });
 
-    // Step 2: Run the encoding pipeline (prints to debug console).
-    EncoderService.encodeAndPrint(text);
+    // Step 2: Run full pipeline — UTF-8 → RS → 4-PPM → get signal.
+    final signal = FourPpmService.encodeAndModulate(text);
+    debugPrint('  Signal length: ${signal.length} chips');
 
-    // Step 3: Append the sent message and update HUD to "ready".
+    // Step 3: Send signal to native flashlight via MethodChannel.
+    setState(() {
+      _hudEntries = [
+        const HudEntry(tag: 'UTF8', text: 'Binary conversion complete'),
+        const HudEntry(tag: 'RS', text: 'Parity symbols appended'),
+        const HudEntry(tag: '4PPM', text: 'Modulation complete'),
+        const HudEntry(tag: 'TX', text: 'Transmitting via flashlight...'),
+      ];
+    });
+
+    try {
+      await _modemChannel.invokeMethod('transmit', {'signal': signal});
+    } catch (e) {
+      debugPrint('  ⚠ Transmit error: $e');
+    }
+
+    // Step 4: Append the sent message and update HUD to "done".
     setState(() {
       _messages.add(Message.sent(text));
       _hudEntries = [
         const HudEntry(tag: 'UTF8', text: 'Binary conversion complete'),
         const HudEntry(tag: 'RS', text: 'Parity symbols appended'),
-        const HudEntry(tag: 'TX', text: 'Transmission ready ✓'),
+        const HudEntry(tag: '4PPM', text: 'Modulation complete'),
+        const HudEntry(tag: 'TX', text: 'Transmission complete ✓'),
       ];
     });
 
