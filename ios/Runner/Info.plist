@@ -45,5 +45,7 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>BITSBlink needs camera access for optical signal debugging.</string>
 </dict>
 </plist>
