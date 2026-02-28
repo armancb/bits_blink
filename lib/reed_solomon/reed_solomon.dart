@@ -1,26 +1,81 @@
 import 'galois_field.dart';
 
+/// Reed-Solomon error **and erasure** correction.
+///
+/// ### Erasure support (crucial for 4-PPM optical modem)
+///
+/// Any byte in [messageIn] that is **negative** (e.g. `-1`) is treated
+/// as a *known* erasure rather than an *unknown* error.
+///
+///  - An **unknown error** costs **2** parity symbols to correct.
+///  - A  **known erasure** costs only **1** parity symbol to correct,
+///    effectively **doubling** the correction capacity for that symbol.
+///
+/// In the modem pipeline the 4-PPM demodulator sets a byte to `-1`
+/// whenever any of its four 4-slot chunks is completely dark
+/// (`[false, false, false, false]`), signalling a physical obstruction.
+///
+/// With `nsym == dataLength` (1:1 parity) the codec can recover from
+/// up to **nsym pure erasures** — i.e. 50 % of the codeword can be
+/// physically blocked and still be fully recovered.
+///
+/// Returns the corrected codeword `[data | parity]`, or `null` if the
+/// damage exceeds the correction capacity.
 List<int>? rsCorrectMessage(List<int> messageIn, int nsym) {
   List<int> messageOut = List<int>.of(messageIn);
+
+  // ── Erasure detection: negative values → known erasure positions ──
   List<int> erasePos = [];
   for (int i = 0; i < messageOut.length; i++) {
     if (messageOut[i] < 0) {
-      messageOut[i] = 0;
-      erasePos.add(i);
+      messageOut[i] = 0;   // placeholder for GF arithmetic
+      erasePos.add(i);     // record the position
     }
   }
+
+  // More erasures than parity symbols → unrecoverable.
   if (erasePos.length > nsym) return null;
+
   List<int> synd = _rsCalculateSyndrome(messageOut, nsym);
-  if (_max(synd) == 0) return messageOut;
+  if (_max(synd) == 0) return messageOut; // no errors at all
+
   List<int> fsynd = _rsForneySyndrome(synd, erasePos, messageOut.length);
   List<int>? errPolynomial = _rsGeneratorErrorPolynomial(fsynd);
   if (errPolynomial == null) return null;
+
   List<int>? errPos = _rsFindErrors(errPolynomial, messageOut.length);
   if (errPos == null) return null;
+
   messageOut = _rsCorrectErrata(messageOut, synd, erasePos..addAll(errPos));
+
+  // Final sanity check.
   synd = _rsCalculateSyndrome(messageOut, nsym);
   if (_max(synd) > 0) return null;
   return messageOut;
+}
+
+/// High-level decode function for the optical-modem pipeline.
+///
+/// Takes the [demodulatedBytes] output from `ModemLogic.demodulate4PPM`
+/// (which may contain `-1` erasure markers) and the [dataLength]
+/// (number of original payload bytes, which also equals `nsym`).
+///
+/// Returns **only the recovered data bytes** (parity stripped),
+/// or `null` if correction failed.
+///
+/// Example:
+/// ```dart
+/// final corrected = rsDecodePayload(demodulatedBytes, dataLength);
+/// if (corrected != null) {
+///   final text = utf8.decode(corrected);
+/// }
+/// ```
+List<int>? rsDecodePayload(List<int> demodulatedBytes, int dataLength) {
+  final int nsym = dataLength; // 1:1 parity ratio
+  final corrected = rsCorrectMessage(demodulatedBytes, nsym);
+  if (corrected == null) return null;
+  // Strip parity — return only the first dataLength bytes.
+  return corrected.sublist(0, dataLength);
 }
 
 /// Reed-Solomon main encoding function, using polynomial division
