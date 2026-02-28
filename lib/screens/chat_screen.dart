@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/message.dart';
+import '../services/encoder_service.dart';
 import '../widgets/app_header.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/message_input.dart';
@@ -17,28 +18,8 @@ class _ChatScreenState extends State<ChatScreen> {
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
 
-  /// Pre-populated sample conversation.
-  final List<Message> _messages = [
-    const Message(
-      text:
-          'Diver 2 here. Ambient light is high. Switching to high-contrast mode.',
-      timestamp: '14:02:33',
-      isSentByMe: false,
-      senderName: 'Diver 2',
-    ),
-    const Message(
-      text: 'Copy that. Filters applied. Readability check?',
-      timestamp: '14:03:10',
-      isSentByMe: true,
-      senderName: 'Surface',
-    ),
-    const Message(
-      text: 'Crystal clear. Proceeding to target coordinates.',
-      timestamp: '14:04:45',
-      isSentByMe: false,
-      senderName: 'Diver 2',
-    ),
-  ];
+  final List<Message> _messages = [];
+  List<HudEntry> _hudEntries = [];
 
   @override
   void dispose() {
@@ -47,10 +28,27 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  /// Appends a new sent message and scrolls to the bottom.
+  /// Encodes and sends a message, updating the HUD as it goes.
   void _handleSend(String text) {
+    // Step 1: Show encoding-in-progress on HUD.
+    setState(() {
+      _hudEntries = [
+        const HudEntry(tag: 'UTF8', text: 'Converting to binary...'),
+        const HudEntry(tag: 'RS', text: 'Reed-Solomon encoding...'),
+      ];
+    });
+
+    // Step 2: Run the encoding pipeline (prints to debug console).
+    EncoderService.encodeAndPrint(text);
+
+    // Step 3: Append the sent message and update HUD to "ready".
     setState(() {
       _messages.add(Message.sent(text));
+      _hudEntries = [
+        const HudEntry(tag: 'UTF8', text: 'Binary conversion complete'),
+        const HudEntry(tag: 'RS', text: 'Parity symbols appended'),
+        const HudEntry(tag: 'TX', text: 'Transmission ready ✓'),
+      ];
     });
 
     // Scroll to bottom after the frame renders.
@@ -76,18 +74,28 @@ class _ChatScreenState extends State<ChatScreen> {
 
           // ── Messages list ──
           Expanded(
-            child: ListView.builder(
-              controller: _scrollController,
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              itemCount: _messages.length,
-              itemBuilder: (context, index) {
-                return MessageBubble(message: _messages[index]);
-              },
-            ),
+            child: _messages.isEmpty
+                ? Center(
+                    child: Text(
+                      'Send a message to begin transmission',
+                      style: TextStyle(
+                        color: Colors.grey.shade400,
+                        fontSize: 14,
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    itemCount: _messages.length,
+                    itemBuilder: (context, index) {
+                      return MessageBubble(message: _messages[index]);
+                    },
+                  ),
           ),
 
           // ── Telemetry HUD ──
-          const TelemetryHud(),
+          TelemetryHud(entries: _hudEntries),
 
           // ── Input bar ──
           MessageInput(controller: _controller, onSend: _handleSend),

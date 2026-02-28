@@ -2,9 +2,19 @@ import 'package:flutter/material.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 
-/// Dark telemetry HUD panel showing optical modem status lines.
+/// A single telemetry log entry (tag + message).
+class HudEntry {
+  final String tag;
+  final String text;
+
+  const HudEntry({required this.tag, required this.text});
+}
+
+/// Dark telemetry HUD panel showing dynamic optical modem status lines.
 class TelemetryHud extends StatelessWidget {
-  const TelemetryHud({super.key});
+  final List<HudEntry> entries;
+
+  const TelemetryHud({super.key, this.entries = const []});
 
   @override
   Widget build(BuildContext context) {
@@ -29,15 +39,17 @@ class TelemetryHud extends StatelessWidget {
           const SizedBox(height: 12),
 
           // ── Log entries ──
-          _logLine(tag: 'PHY', text: 'Pulse width calibrated: 12ms'),
-          _logLine(tag: 'SYNC', text: 'Preamble sequence locked'),
-          _logLine(tag: 'FEC', text: 'Reed-Solomon engaging...'),
+          if (entries.isEmpty)
+            Text('Awaiting transmission...', style: AppTextStyles.hudLog)
+          else
+            for (final entry in entries)
+              _logLine(tag: entry.tag, text: entry.text),
         ],
       ),
     );
   }
 
-  /// Green pulsing status dot.
+  /// Green status dot.
   Widget _pulseDot() {
     return Container(
       width: 8,

@@ -1,7 +1,7 @@
-late List<int> GF_EXP;
-late List<int> GF_LOG;
-late int GF_EXP_SIZE;
-late int GF_LOG_SIZE;
+late List<int> gfExp;
+late List<int> gfLog;
+late int gfExpSize;
+late int gfLogSize;
 
 int gfDivide(int x, int y) {
   if (y == 0) {
@@ -10,7 +10,7 @@ int gfDivide(int x, int y) {
   if (x == 0) {
     return 0;
   }
-  return GF_EXP[GF_LOG[x] + (GF_LOG_SIZE - 1) - GF_LOG[y]];
+  return gfExp[gfLog[x] + (gfLogSize - 1) - gfLog[y]];
 }
 
 int gfInverse(int y) {
@@ -19,7 +19,7 @@ int gfInverse(int y) {
 
 int gfMultiply(int x, int y) {
   if (x == 0 || y == 0) return 0;
-  return GF_EXP[GF_LOG[x] + GF_LOG[y]];
+  return gfExp[gfLog[x] + gfLog[y]];
 }
 
 /// Addition of two polynomials (using exclusive-or, as usual).
@@ -40,17 +40,17 @@ List<int> gfPolynomialAdd(List<int> p, List<int> q) {
 /// Does not work with standard polynomials outside of this galois field;
 /// see the Wikipedia article for the generic algorithm.
 List<int> gfPolynomialDivide(List<int> dividend, List<int> divisor) {
-  List<int> msg_out = List<int>.of(dividend);
+  List<int> msgOut = List<int>.of(dividend);
   for (int i = 0; i < dividend.length - (divisor.length - 1); i++) {
-    int coef = msg_out[i];
+    int coef = msgOut[i];
     if (coef != 0) {
       for (int j = 1; j < divisor.length; j++) {
-        msg_out[i + j] ^= gfMultiply(divisor[j], coef);
+        msgOut[i + j] ^= gfMultiply(divisor[j], coef);
       }
     }
   }
   int separator = divisor.length - 1;
-  return msg_out.sublist(msg_out.length - separator);
+  return msgOut.sublist(msgOut.length - separator);
 }
 
 /// Evaluate a polynomial at a particular value of x, producing a scalar result.
@@ -82,8 +82,7 @@ List<int> gfPolynomialScale(List<int> p, int x) {
   return List<int>.of(r);
 }
 
-// TODO(kleak): see how we can let the user choose
-// Possible value here:
+// Possible primitive polynomial values:
 //   0x0, 0x3, 0x7, 0xB, 0x13, 0x25, 0x43, 0x83,
 //   0x11D, 0x211, 0x409, 0x805, 0x1053, 0x201B, 0x402B, 0x8003, 0x1100B
 void initTables() => _initTables(0x11D);
@@ -111,21 +110,21 @@ void _initTables(int prim) {
     0x1100B,
   ];
   int pos = prims.indexOf(prim);
-  GF_LOG_SIZE = 1 << pos;
-  GF_EXP_SIZE = GF_LOG_SIZE * 2;
-  GF_EXP = List.filled(GF_EXP_SIZE, 1);
-  GF_LOG = List.filled(GF_LOG_SIZE, 0);
-  int log_minus_one = GF_LOG_SIZE - 1;
+  gfLogSize = 1 << pos;
+  gfExpSize = gfLogSize * 2;
+  gfExp = List.filled(gfExpSize, 1);
+  gfLog = List.filled(gfLogSize, 0);
+  int logMinusOne = gfLogSize - 1;
   int x = 1;
-  for (int i = 1; i < log_minus_one; i++) {
+  for (int i = 1; i < logMinusOne; i++) {
     x <<= 1;
-    if (x & GF_LOG_SIZE == GF_LOG_SIZE) {
+    if (x & gfLogSize == gfLogSize) {
       x ^= prim;
     }
-    GF_EXP[i] = x;
-    GF_LOG[x] = i;
+    gfExp[i] = x;
+    gfLog[x] = i;
   }
-  for (int i = log_minus_one; i < GF_EXP_SIZE; i++) {
-    GF_EXP[i] = GF_EXP[i - log_minus_one];
+  for (int i = logMinusOne; i < gfExpSize; i++) {
+    gfExp[i] = gfExp[i - logMinusOne];
   }
 }

@@ -1,44 +1,44 @@
 import 'galois_field.dart';
 
-List<int>? rsCorrectMessage(List<int> message_in, int nsym) {
-  List<int> message_out = List<int>.of(message_in);
-  List<int> erase_pos = [];
-  for (int i = 0; i < message_out.length; i++) {
-    if (message_out[i] < 0) {
-      message_out[i] = 0;
-      erase_pos.add(i);
+List<int>? rsCorrectMessage(List<int> messageIn, int nsym) {
+  List<int> messageOut = List<int>.of(messageIn);
+  List<int> erasePos = [];
+  for (int i = 0; i < messageOut.length; i++) {
+    if (messageOut[i] < 0) {
+      messageOut[i] = 0;
+      erasePos.add(i);
     }
   }
-  if (erase_pos.length > nsym) return null;
-  List<int> synd = _rsCalculateSyndrome(message_out, nsym);
-  if (_max(synd) == 0) return message_out;
-  List<int> fsynd = _rsForneySyndrome(synd, erase_pos, message_out.length);
-  List<int>? err_polynomial = _rsGeneratorErrorPolynomial(fsynd);
-  if (err_polynomial == null) return null;
-  List<int>? err_pos = _rsFindErrors(err_polynomial, message_out.length);
-  if (err_pos == null) return null;
-  message_out = _rsCorrectErrata(message_out, synd, erase_pos..addAll(err_pos));
-  synd = _rsCalculateSyndrome(message_out, nsym);
+  if (erasePos.length > nsym) return null;
+  List<int> synd = _rsCalculateSyndrome(messageOut, nsym);
+  if (_max(synd) == 0) return messageOut;
+  List<int> fsynd = _rsForneySyndrome(synd, erasePos, messageOut.length);
+  List<int>? errPolynomial = _rsGeneratorErrorPolynomial(fsynd);
+  if (errPolynomial == null) return null;
+  List<int>? errPos = _rsFindErrors(errPolynomial, messageOut.length);
+  if (errPos == null) return null;
+  messageOut = _rsCorrectErrata(messageOut, synd, erasePos..addAll(errPos));
+  synd = _rsCalculateSyndrome(messageOut, nsym);
   if (_max(synd) > 0) return null;
-  return message_out;
+  return messageOut;
 }
 
 /// Reed-Solomon main encoding function, using polynomial division
 /// (algorithm Extended Synthetic Division).
-List<int> rsEncodeMessage(List<int> message_in, int nsym) {
+List<int> rsEncodeMessage(List<int> messageIn, int nsym) {
   List<int> gen = _rsGeneratorPolynomial(nsym);
-  List<int> message_out = List.filled(message_in.length + gen.length - 1, 0);
-  message_out.setAll(0, message_in);
-  for (int i = 0; i < message_in.length; i++) {
-    int coef = message_out[i];
+  List<int> messageOut = List.filled(messageIn.length + gen.length - 1, 0);
+  messageOut.setAll(0, messageIn);
+  for (int i = 0; i < messageIn.length; i++) {
+    int coef = messageOut[i];
     if (coef != 0) {
       for (int j = 1; j < gen.length; j++) {
-        message_out[i + j] ^= gfMultiply(gen[j], coef);
+        messageOut[i + j] ^= gfMultiply(gen[j], coef);
       }
     }
   }
-  message_out.setAll(0, message_in);
-  return List<int>.of(message_out);
+  messageOut.setAll(0, messageIn);
+  return List<int>.of(messageOut);
 }
 
 int _max(List<int> list) {
@@ -55,7 +55,7 @@ int _max(List<int> list) {
 List<int> _rsCalculateSyndrome(List<int> msg, int nsym) {
   List<int> synd = List.filled(nsym, 0);
   for (int i = 0; i < nsym; i++) {
-    synd[i] = gfPolynomialEval(msg, GF_EXP[i]);
+    synd[i] = gfPolynomialEval(msg, gfExp[i]);
   }
   return synd;
 }
@@ -63,115 +63,105 @@ List<int> _rsCalculateSyndrome(List<int> msg, int nsym) {
 /// Forney algorithm, computes the values (error magnitude)
 /// to correct the input message.
 List<int> _rsCorrectErrata(List<int> message, List<int> synd, List<int> pos) {
-  List<int> coef_pos = <int>[];
-  pos.forEach((int value) => coef_pos.add(message.length - 1 - value));
-  List<int> loc = _rsFindErrataLocator(coef_pos);
+  List<int> coefPos = <int>[];
+  for (final value in pos) {
+    coefPos.add(message.length - 1 - value);
+  }
+  List<int> loc = _rsFindErrataLocator(coefPos);
   List<int> reversed = List<int>.of(synd.sublist(0, pos.length).reversed);
   List<int> eval = _rsFindErrorEvaluator(reversed, loc, pos.length - 1);
-  List<int> locprime = <int>[];
+  List<int> locPrime = <int>[];
   bool skipNext = false;
-  locprime.addAll(
+  locPrime.addAll(
     loc.skip(loc.length & 1).where((int value) {
       skipNext = !skipNext;
       return skipNext;
     }),
   );
-  pos.forEach((int value) {
-    int x = GF_EXP[value + GF_LOG_SIZE - message.length];
+  for (final value in pos) {
+    int x = gfExp[value + gfLogSize - message.length];
     int y = gfPolynomialEval(eval, x);
-    int z = gfPolynomialEval(locprime, gfMultiply(x, x));
+    int z = gfPolynomialEval(locPrime, gfMultiply(x, x));
     int magnitude = gfDivide(y, gfMultiply(x, z));
     message[value] ^= magnitude;
-  });
+  }
   return message;
 }
 
 /// Compute the erasures/errors/errata locator polynomial from the
 /// erasures/errors/errata positions.
-///
-/// The positions must be relative to the x coefficient, e.g.:
-/// "hello worldxxxxxxxxx" is tampered to "h_ll_ worldxxxxxxxxx"
-/// with xxxxxxxxx being the ecc of length n-k=9, here the string
-/// positions are [1, 4], but the coefficients are reversed since the
-/// ecc characters are placed as the first coefficients of the polynomial,
-/// thus the coefficients of the erased characters are
-/// n-1 - [1, 4] = [18, 15] = erasures_loc to be specified as an argument.
-List<int> _rsFindErrataLocator(List<int> e_pos) {
-  List<int> e_loc = [1];
-  for (int x in e_pos) {
-    e_loc = gfPolynomialMultiply(e_loc, gfPolynomialAdd([1], [GF_EXP[x], 0]));
+List<int> _rsFindErrataLocator(List<int> ePos) {
+  List<int> eLoc = [1];
+  for (int x in ePos) {
+    eLoc = gfPolynomialMultiply(eLoc, gfPolynomialAdd([1], [gfExp[x], 0]));
   }
-  return e_loc;
+  return eLoc;
 }
 
-/// Compute the error (or erasures if you supply sigma=erasures locator
-/// polynomial, or errata) evaluator polynomial Omega from the syndrome
+/// Compute the error evaluator polynomial Omega from the syndrome
 /// and the error/erasures/errata locator Sigma.
-List<int> _rsFindErrorEvaluator(List<int> synd, List<int> err_loc, int nsym) {
-  List<int> remainder = gfPolynomialDivide(
-    gfPolynomialMultiply(synd, err_loc),
-    [1, ...List.filled(nsym + 1, 0)],
-  );
+List<int> _rsFindErrorEvaluator(List<int> synd, List<int> errLoc, int nsym) {
+  List<int> remainder = gfPolynomialDivide(gfPolynomialMultiply(synd, errLoc), [
+    1,
+    ...List.filled(nsym + 1, 0),
+  ]);
   return remainder;
 }
 
-/// Find the roots (ie, where evaluation = zero) of error polynomial by
-/// brute-force trial. This is a sort of Chien's search (but less efficient;
-/// Chien's search is a way to evaluate the polynomial such that each
-/// evaluation only takes constant time).
-List<int>? _rsFindErrors(List<int> err_loc, int nmess) {
-  int errs = err_loc.length - 1;
-  List<int> err_pos = <int>[];
+/// Find the roots of error polynomial by brute-force trial (Chien's search).
+List<int>? _rsFindErrors(List<int> errLoc, int nmess) {
+  int errs = errLoc.length - 1;
+  List<int> errPos = <int>[];
   for (int i = 0; i < nmess; i++) {
-    if (gfPolynomialEval(err_loc, GF_EXP[(GF_LOG_SIZE - 1) - i]) == 0) {
-      err_pos.add(nmess - 1 - i);
+    if (gfPolynomialEval(errLoc, gfExp[(gfLogSize - 1) - i]) == 0) {
+      errPos.add(nmess - 1 - i);
     }
   }
-  if (err_pos.length != errs) {
+  if (errPos.length != errs) {
     return null;
   }
-  return err_pos;
+  return errPos;
 }
 
 /// Calculating the Forney syndromes.
 List<int> _rsForneySyndrome(List<int> synd, List<int> pos, int nmess) {
   List<int> fsynd = List<int>.of(synd);
-  pos.forEach((int value) {
-    int x = GF_EXP[nmess - 1 - value];
+  for (final value in pos) {
+    int x = gfExp[nmess - 1 - value];
     for (int j = 0; j < fsynd.length - 1; j++) {
       fsynd[j] = gfMultiply(fsynd[j], x) ^ fsynd[j + 1];
     }
     fsynd.removeLast();
-  });
+  }
   return fsynd;
 }
 
 /// Find error locator polynomial with Berlekamp-Massey algorithm.
 List<int>? _rsGeneratorErrorPolynomial(List<int> synd) {
-  List<int> err_loc = [1];
-  List<int> old_loc = [1];
+  List<int> errLoc = [1];
+  List<int> oldLoc = [1];
 
   for (int i = 0; i < synd.length; i++) {
-    old_loc.add(0);
+    oldLoc.add(0);
     int delta = synd[i];
-    for (int j = 1; j < err_loc.length; j++) {
-      delta ^= gfMultiply(err_loc[err_loc.length - 1 - j], synd[i - j]);
+    for (int j = 1; j < errLoc.length; j++) {
+      delta ^= gfMultiply(errLoc[errLoc.length - 1 - j], synd[i - j]);
     }
     if (delta != 0) {
-      if (old_loc.length > err_loc.length) {
-        List<int> new_loc = gfPolynomialScale(old_loc, delta);
-        old_loc = gfPolynomialScale(err_loc, gfInverse(delta));
-        err_loc = new_loc;
+      if (oldLoc.length > errLoc.length) {
+        List<int> newLoc = gfPolynomialScale(oldLoc, delta);
+        oldLoc = gfPolynomialScale(errLoc, gfInverse(delta));
+        errLoc = newLoc;
       }
-      err_loc = gfPolynomialAdd(err_loc, gfPolynomialScale(old_loc, delta));
+      errLoc = gfPolynomialAdd(errLoc, gfPolynomialScale(oldLoc, delta));
     }
   }
-  err_loc.removeWhere((int value) => value == 0);
-  int errs = err_loc.length - 1;
+  errLoc.removeWhere((int value) => value == 0);
+  int errs = errLoc.length - 1;
   if (errs * 2 > synd.length) {
     return null;
   }
-  return err_loc;
+  return errLoc;
 }
 
 /// Computes the generator polynomial for a given number of error
@@ -179,7 +169,7 @@ List<int>? _rsGeneratorErrorPolynomial(List<int> synd) {
 List<int> _rsGeneratorPolynomial(int nsym) {
   List<int> g = [1];
   for (int i = 0; i < nsym; i++) {
-    g = gfPolynomialMultiply(g, [1, GF_EXP[i]]);
+    g = gfPolynomialMultiply(g, [1, gfExp[i]]);
   }
   return g;
 }
