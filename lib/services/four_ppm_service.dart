@@ -39,7 +39,6 @@ class FourPpmService {
   /// Takes a list of packet bytes and returns the full 4-PPM chip
   /// sequence as a string of '1's and '0's.
   static String modulateTo4Ppm(List<int> packetBytes) {
-    // Convert every byte → 8-bit binary → take 2 bits at a time → map
     final buffer = StringBuffer();
 
     for (final byte in packetBytes) {
@@ -47,17 +46,23 @@ class FourPpmService {
       for (int i = 0; i < bits.length; i += 2) {
         final diBit = bits.substring(i, i + 2);
         buffer.write(_ppmTable[diBit]);
-        buffer.write(' '); // space between symbols for readability
+        buffer.write(' ');
       }
     }
 
     return buffer.toString().trimRight();
   }
 
+  /// Converts a 4-PPM chip string into a `List<bool>` signal
+  /// ('1' → true, '0' → false). Spaces are stripped.
+  static List<bool> _chipStringToSignal(String chipStr) {
+    return chipStr.replaceAll(' ', '').split('').map((c) => c == '1').toList();
+  }
+
   /// Full pipeline: takes the original text, encodes it (UTF-8 + RS),
   /// builds the final packet, applies 4-PPM modulation, and prints
   /// everything to the debug console.
-  static void encodeAndModulate(String text) {
+  static List<bool> encodeAndModulate(String text) {
     _ensureInit();
 
     final words = text.split(RegExp(r'\s+'));
@@ -111,19 +116,34 @@ class FourPpmService {
       debugPrint('  └─────────────────────────────────────────────');
       debugPrint('');
       debugPrint('  Total bits in  : ${packet.length * 8}');
-      debugPrint('  Total chips out: ${packet.length * 8 * 2}'
-          '  (4 chips per 2 bits → 2× expansion)');
+      debugPrint(
+        '  Total chips out: ${packet.length * 8 * 2}'
+        '  (4 chips per 2 bits → 2× expansion)',
+      );
       debugPrint('───────────────────────────────────────────────────');
     }
 
     debugPrint('  ✓ 4-PPM modulation complete');
     debugPrint('═══════════════════════════════════════════════════');
     debugPrint('');
+
+    // Build the combined signal from all words.
+    final allChips = <bool>[];
+    for (final word in words) {
+      final utf8Bytes = utf8.encode(word);
+      final rsEncoded = rsEncodeMessage(utf8Bytes, utf8Bytes.length);
+      final packet = <int>[_preambleByte, utf8Bytes.length, ...rsEncoded];
+      allChips.addAll(_chipStringToSignal(modulateTo4Ppm(packet)));
+    }
+    return allChips;
   }
 
   /// Returns a human-readable label for each byte position in the packet.
   static String _formatByteLabel(
-      int byteIdx, List<int> packet, int messageLength) {
+    int byteIdx,
+    List<int> packet,
+    int messageLength,
+  ) {
     if (byteIdx == 0) return 'Preamble (${_toBinary(packet[byteIdx])})';
     if (byteIdx == 1) return 'Length   (${_toBinary(packet[byteIdx])})';
 
