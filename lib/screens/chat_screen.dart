@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/message.dart';
-import '../services/four_ppm_service.dart';
+import '../services/encoder_service.dart';
 import '../widgets/app_header.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/message_input.dart';
@@ -43,7 +43,7 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
     // Step 2: Run full pipeline — UTF-8 → RS → 4-PPM → get signal.
-    final signal = FourPpmService.encodeAndModulate(text);
+    final signal = EncoderService.encode(text);
     debugPrint('  Signal length: ${signal.length} chips');
 
     // Step 3: Send signal to native flashlight via MethodChannel.

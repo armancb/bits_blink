@@ -6,7 +6,10 @@ import AVFoundation
 @objc class AppDelegate: FlutterAppDelegate {
 
     private var captureSession: AVCaptureSession?
-    private var pendingResult: FlutterResult?
+    private var eventSink: FlutterEventSink?
+    private var isStreaming = false
+    private var lastFrameTime: CFTimeInterval = 0
+    private let frameDelta: CFTimeInterval = 0.066  // ~15 FPS
 
     override func application(
         _ application: UIApplication,
@@ -15,62 +18,70 @@ import AVFoundation
         GeneratedPluginRegistrant.register(with: self)
 
         let controller = window?.rootViewController as! FlutterViewController
+        let messenger = controller.binaryMessenger
+
+        // ── Control channel ──
         let channel = FlutterMethodChannel(
             name: "com.bitsblink/hardware",
-            binaryMessenger: controller.binaryMessenger
+            binaryMessenger: messenger
         )
 
         channel.setMethodCallHandler { [weak self] (call, result) in
-            if call.method == "captureDebugFrame" {
-                self?.pendingResult = result
-                self?.requestCameraAndCapture()
-            } else {
+            switch call.method {
+            case "startDebugStream":
+                self?.requestCameraAndStart(result: result)
+            case "stopDebugStream":
+                self?.stopStreaming()
+                result(true)
+            default:
                 result(FlutterMethodNotImplemented)
             }
         }
 
+        // ── Event channel for frame streaming ──
+        let eventChannel = FlutterEventChannel(
+            name: "com.bitsblink/debug_stream",
+            binaryMessenger: messenger
+        )
+        eventChannel.setStreamHandler(FrameStreamHandler(appDelegate: self))
+
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
     }
 
-    private func requestCameraAndCapture() {
+    private func requestCameraAndStart(result: @escaping FlutterResult) {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         switch status {
         case .authorized:
-            startCapture()
+            startStreaming()
+            result(true)
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 DispatchQueue.main.async {
                     if granted {
-                        self?.startCapture()
+                        self?.startStreaming()
+                        result(true)
                     } else {
-                        self?.pendingResult?(
-                            FlutterError(code: "PERMISSION_DENIED",
-                                         message: "Camera permission denied", details: nil)
-                        )
-                        self?.pendingResult = nil
+                        result(FlutterError(code: "PERMISSION_DENIED",
+                                           message: "Camera permission denied", details: nil))
                     }
                 }
             }
         default:
-            pendingResult?(
-                FlutterError(code: "PERMISSION_DENIED",
-                             message: "Camera permission denied", details: nil)
-            )
-            pendingResult = nil
+            result(FlutterError(code: "PERMISSION_DENIED",
+                               message: "Camera permission denied", details: nil))
         }
     }
 
-    private func startCapture() {
+    func startStreaming() {
+        guard !isStreaming else { return }
+        isStreaming = true
+
         let session = AVCaptureSession()
         session.sessionPreset = .medium
         self.captureSession = session
 
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
               let input = try? AVCaptureDeviceInput(device: device) else {
-            pendingResult?(
-                FlutterError(code: "CAMERA_ERROR", message: "Cannot open camera", details: nil)
-            )
-            pendingResult = nil
             return
         }
 
@@ -80,34 +91,38 @@ import AVFoundation
         output.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         ]
+        output.alwaysDiscardsLateVideoFrames = true
 
         let queue = DispatchQueue(label: "com.bitsblink.cameraQueue")
-        let delegate = SingleFrameDelegate { [weak self] pixelBuffer in
-            self?.captureSession?.stopRunning()
-            self?.captureSession = nil
-
-            guard let jpegData = self?.processPixelBuffer(pixelBuffer) else {
-                DispatchQueue.main.async {
-                    self?.pendingResult?(
-                        FlutterError(code: "PROCESS_ERROR",
-                                     message: "Failed to process frame", details: nil)
-                    )
-                    self?.pendingResult = nil
-                }
-                return
-            }
-
-            DispatchQueue.main.async {
-                self?.pendingResult?(FlutterStandardTypedData(bytes: jpegData))
-                self?.pendingResult = nil
-            }
+        let delegate = ContinuousFrameDelegate { [weak self] pixelBuffer in
+            self?.handleFrame(pixelBuffer)
         }
         output.setSampleBufferDelegate(delegate, queue: queue)
-        // Keep a strong reference so delegate isn't released
         objc_setAssociatedObject(output, "delegate", delegate, .OBJC_ASSOCIATION_RETAIN)
 
         session.addOutput(output)
         session.startRunning()
+    }
+
+    func stopStreaming() {
+        isStreaming = false
+        captureSession?.stopRunning()
+        captureSession = nil
+    }
+
+    private func handleFrame(_ pixelBuffer: CVPixelBuffer) {
+        guard isStreaming else { return }
+
+        // Throttle
+        let now = CACurrentMediaTime()
+        guard now - lastFrameTime >= frameDelta else { return }
+        lastFrameTime = now
+
+        guard let jpegData = processPixelBuffer(pixelBuffer) else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.eventSink?(FlutterStandardTypedData(bytes: jpegData))
+        }
     }
 
     private func processPixelBuffer(_ pixelBuffer: CVPixelBuffer) -> Data? {
@@ -122,7 +137,6 @@ import AVFoundation
         let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
         let yRowBytes = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
 
-        // ── 1. Copy Y-plane to contiguous array ──
         let yData = UnsafeMutablePointer<UInt8>.allocate(capacity: width * height)
         defer { yData.deallocate() }
 
@@ -133,7 +147,7 @@ import AVFoundation
             dstRow.update(from: srcRow, count: width)
         }
 
-        // ── 2. Find brightest ROI (8×8 block scan, 4-block cluster) ──
+        // ROI detection
         let blockSize = 8
         let roiBlocks = 4
         let gridW = width / blockSize
@@ -143,70 +157,104 @@ import AVFoundation
         var bestX = 0
         var bestY = 0
 
-        for gy in 0..<(gridH - roiBlocks) {
-            for gx in 0..<(gridW - roiBlocks) {
-                var sum = 0
-                for by in 0..<roiBlocks {
-                    for bx in 0..<roiBlocks {
-                        let px = (gx + bx) * blockSize + blockSize / 2
-                        let py = (gy + by) * blockSize + blockSize / 2
-                        sum += Int(yData[py * width + px])
+        if gridW > roiBlocks && gridH > roiBlocks {
+            for gy in 0..<(gridH - roiBlocks) {
+                for gx in 0..<(gridW - roiBlocks) {
+                    var sum = 0
+                    for by in 0..<roiBlocks {
+                        for bx in 0..<roiBlocks {
+                            let px = (gx + bx) * blockSize + blockSize / 2
+                            let py = (gy + by) * blockSize + blockSize / 2
+                            if py < height && px < width {
+                                sum += Int(yData[py * width + px])
+                            }
+                        }
                     }
-                }
-                if sum > bestSum {
-                    bestSum = sum
-                    bestX = gx * blockSize
-                    bestY = gy * blockSize
+                    if sum > bestSum {
+                        bestSum = sum
+                        bestX = gx * blockSize
+                        bestY = gy * blockSize
+                    }
                 }
             }
         }
 
         let roiSize = roiBlocks * blockSize
-        let roiX = min(max(bestX, 0), width - roiSize)
-        let roiY = min(max(bestY, 0), height - roiSize)
+        let roiX = min(max(bestX, 0), max(width - roiSize, 0))
+        let roiY = min(max(bestY, 0), max(height - roiSize, 0))
 
-        // ── 3. Draw bounding box (white, 2px) ──
-        drawRect(yData, width: width, height: height,
-                 rx: roiX, ry: roiY, rw: roiSize, rh: roiSize, thickness: 2)
+        // Convert to RGB + red bounding box
+        let rgbData = UnsafeMutablePointer<UInt8>.allocate(capacity: width * height * 3)
+        defer { rgbData.deallocate() }
+        for i in 0..<(width * height) {
+            let gray = yData[i]
+            rgbData[i * 3]     = gray
+            rgbData[i * 3 + 1] = gray
+            rgbData[i * 3 + 2] = gray
+        }
 
-        // ── 4. Create grayscale CGImage → JPEG ──
-        let colorSpace = CGColorSpaceCreateDeviceGray()
+        drawRedRect(rgbData, width: width, height: height,
+                    rx: roiX, ry: roiY, rw: roiSize, rh: roiSize, thickness: 2)
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
         guard let context = CGContext(
-            data: yData, width: width, height: height,
-            bitsPerComponent: 8, bytesPerRow: width,
+            data: rgbData, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width * 3,
             space: colorSpace, bitmapInfo: CGImageAlphaInfo.none.rawValue
         ), let cgImage = context.makeImage() else {
             return nil
         }
 
         let uiImage = UIImage(cgImage: cgImage)
-        return uiImage.jpegData(compressionQuality: 0.85)
+        return uiImage.jpegData(compressionQuality: 0.7)
     }
 
-    private func drawRect(_ data: UnsafeMutablePointer<UInt8>,
-                          width: Int, height: Int,
-                          rx: Int, ry: Int, rw: Int, rh: Int, thickness: Int) {
-        let white: UInt8 = 255
+    private func drawRedRect(_ data: UnsafeMutablePointer<UInt8>,
+                             width: Int, height: Int,
+                             rx: Int, ry: Int, rw: Int, rh: Int, thickness: Int) {
+        func setRed(_ px: Int, _ py: Int) {
+            guard px >= 0, px < width, py >= 0, py < height else { return }
+            let idx = (py * width + px) * 3
+            data[idx]     = 255
+            data[idx + 1] = 0
+            data[idx + 2] = 0
+        }
+
         for t in 0..<thickness {
             for x in rx..<min(rx + rw, width) {
-                let topIdx = (ry + t) * width + x
-                let botIdx = (ry + rh - 1 - t) * width + x
-                if ry + t < height { data[topIdx] = white }
-                if ry + rh - 1 - t >= 0 && ry + rh - 1 - t < height { data[botIdx] = white }
+                setRed(x, ry + t)
+                setRed(x, ry + rh - 1 - t)
             }
             for y in ry..<min(ry + rh, height) {
-                let leftIdx = y * width + (rx + t)
-                let rightIdx = y * width + (rx + rw - 1 - t)
-                if rx + t < width { data[leftIdx] = white }
-                if rx + rw - 1 - t >= 0 && rx + rw - 1 - t < width { data[rightIdx] = white }
+                setRed(rx + t, y)
+                setRed(rx + rw - 1 - t, y)
             }
         }
     }
 }
 
-/// Captures exactly one frame then stops.
-private class SingleFrameDelegate: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
-    private var captured = false
+// ── Stream handler to wire eventSink ──
+private class FrameStreamHandler: NSObject, FlutterStreamHandler {
+    weak var appDelegate: AppDelegate?
+
+    init(appDelegate: AppDelegate?) {
+        self.appDelegate = appDelegate
+    }
+
+    func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+        appDelegate?.eventSink = events
+        return nil
+    }
+
+    func onCancel(withArguments arguments: Any?) -> FlutterError? {
+        appDelegate?.eventSink = nil
+        appDelegate?.stopStreaming()
+        return nil
+    }
+}
+
+// ── Continuous frame delegate ──
+private class ContinuousFrameDelegate: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     private let handler: (CVPixelBuffer) -> Void
 
     init(handler: @escaping (CVPixelBuffer) -> Void) {
@@ -216,9 +264,6 @@ private class SingleFrameDelegate: NSObject, AVCaptureVideoDataOutputSampleBuffe
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        guard !captured else { return }
-        captured = true
-
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         handler(pixelBuffer)
     }

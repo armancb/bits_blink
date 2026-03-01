@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BITSBlink Screen TX</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #0a0a0a;
+    color: #e0e0e0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    transition: background 0ms;
+  }
+
+  body.flash-on  { background: #ffffff !important; }
+  body.flash-off { background: #000000 !important; }
+
+  #controls {
+    text-align: center;
+    z-index: 10;
+    padding: 32px;
+    border-radius: 16px;
+    background: rgba(20,20,20,0.95);
+    border: 1px solid rgba(255,255,255,0.08);
+    backdrop-filter: blur(12px);
+    max-width: 480px;
+    width: 90%;
+  }
+
+  body.flash-on #controls,
+  body.flash-off #controls { display: none; }
+
+  h1 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    color: #888;
+    margin-bottom: 24px;
+  }
+
+  #message {
+    width: 100%;
+    padding: 14px 18px;
+    font-size: 20px;
+    font-family: 'Courier New', monospace;
+    font-weight: 700;
+    background: #1a1a1a;
+    color: #4CAF50;
+    border: 1px solid #333;
+    border-radius: 8px;
+    outline: none;
+    text-align: center;
+  }
+  #message:focus { border-color: #4CAF50; }
+
+  #transmit-btn {
+    margin-top: 20px;
+    width: 100%;
+    padding: 16px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    background: linear-gradient(135deg, #4CAF50, #2E7D32);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: transform 0.1s;
+  }
+  #transmit-btn:hover { transform: scale(1.02); }
+  #transmit-btn:active { transform: scale(0.98); }
+  #transmit-btn:disabled {
+    background: #333;
+    color: #666;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  #status {
+    margin-top: 16px;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    color: #666;
+    min-height: 40px;
+    line-height: 1.6;
+  }
+
+  .chip-speed {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 16px;
+    font-size: 12px;
+    color: #888;
+  }
+  .chip-speed label { letter-spacing: 1px; text-transform: uppercase; }
+  .chip-speed input {
+    width: 80px;
+    padding: 6px 10px;
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    font-weight: 700;
+    background: #1a1a1a;
+    color: #4CAF50;
+    border: 1px solid #333;
+    border-radius: 4px;
+    text-align: center;
+    outline: none;
+  }
+  .chip-speed span { color: #555; }
+
+  #chip-preview {
+    margin-top: 16px;
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    color: #444;
+    word-break: break-all;
+    max-height: 60px;
+    overflow-y: auto;
+    line-height: 1.4;
+  }
+  #chip-preview .one  { color: #4CAF50; }
+  #chip-preview .zero { color: #333; }
+
+  .protocol-info {
+    margin-top: 20px;
+    padding: 12px;
+    background: rgba(76,175,80,0.05);
+    border: 1px solid rgba(76,175,80,0.15);
+    border-radius: 6px;
+    font-size: 10px;
+    color: #666;
+    text-align: left;
+    font-family: 'Courier New', monospace;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+<div id="controls">
+  <h1>⚡ BITSBlink Screen TX</h1>
+
+  <input type="text" id="message" value="hi" placeholder="Type message…"
+         maxlength="50" autocomplete="off" spellcheck="false">
+
+  <div class="chip-speed">
+    <label>Chip:</label>
+    <input type="number" id="chip-ms" value="100" min="30" max="1000" step="10">
+    <span>ms</span>
+  </div>
+
+  <button id="transmit-btn" onclick="transmit()">▶ TRANSMIT</button>
+
+  <div id="status"></div>
+  <div id="chip-preview"></div>
+
+  <div class="protocol-info">
+    PREAMBLE: 10101010101010101010 (20 chips)<br>
+    SYNC:     11001100 (8 chips)<br>
+    LENGTH:   8 chips (byte count)<br>
+    DATA:     N×8 chips (UTF-8, MSB first)
+  </div>
+</div>
+
+<script>
+// ── ENCODER (mirrors encoder_service.dart exactly) ──
+
+const PREAMBLE = [1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0]; // 20 chips
+const SYNC     = [1,1,0,0,1,1,0,0]; // 8 chips
+
+function byteToBits(byte) {
+  const bits = [];
+  for (let i = 7; i >= 0; i--) bits.push((byte >> i) & 1);
+  return bits;
+}
+
+function encode(text) {
+  const encoder = new TextEncoder();
+  const utf8 = encoder.encode(text);
+  if (utf8.length > 255) throw new Error('Message too long');
+
+  const chips = [];
+
+  // 1. Preamble
+  chips.push(...PREAMBLE);
+
+  // 2. Sync word
+  chips.push(...SYNC);
+
+  // 3. Length byte
+  chips.push(...byteToBits(utf8.length));
+
+  // 4. Data bytes
+  for (const byte of utf8) {
+    chips.push(...byteToBits(byte));
+  }
+
+  return chips;
+}
+
+// ── TRANSMITTER ──
+
+let transmitting = false;
+
+function updatePreview() {
+  const text = document.getElementById('message').value;
+  if (!text) { document.getElementById('chip-preview').innerHTML = ''; return; }
+
+  try {
+    const chips = encode(text);
+    let html = '';
+    chips.forEach((c, i) => {
+      // Color-code preamble/sync/data
+      const cls = c ? 'one' : 'zero';
+      html += `<span class="${cls}">${c}</span>`;
+      // Add separator between sections
+      if (i === 19 || i === 27) html += '<span style="color:#666"> | </span>';
+    });
+    document.getElementById('chip-preview').innerHTML = html;
+    document.getElementById('status').textContent =
+      `${chips.length} chips · ${(chips.length * parseInt(document.getElementById('chip-ms').value) / 1000).toFixed(1)}s total`;
+  } catch (e) {
+    document.getElementById('chip-preview').textContent = e.message;
+  }
+}
+
+document.getElementById('message').addEventListener('input', updatePreview);
+document.getElementById('chip-ms').addEventListener('input', updatePreview);
+updatePreview();
+
+async function transmit() {
+  if (transmitting) return;
+  transmitting = true;
+
+  const btn = document.getElementById('transmit-btn');
+  const status = document.getElementById('status');
+  const text = document.getElementById('message').value;
+  const chipMs = parseInt(document.getElementById('chip-ms').value) || 100;
+
+  if (!text) { transmitting = false; return; }
+
+  btn.disabled = true;
+  btn.textContent = '■ TRANSMITTING…';
+
+  const chips = encode(text);
+  status.textContent = `Transmitting "${text}" — ${chips.length} chips @ ${chipMs}ms…`;
+
+  // 500ms dark lead-in (receiver settles)
+  document.body.classList.add('flash-off');
+  await sleep(500);
+
+  // Flash each chip
+  for (let i = 0; i < chips.length; i++) {
+    const start = performance.now();
+
+    if (chips[i]) {
+      document.body.classList.remove('flash-off');
+      document.body.classList.add('flash-on');
+    } else {
+      document.body.classList.remove('flash-on');
+      document.body.classList.add('flash-off');
+    }
+
+    // Busy-wait for precise timing (setTimeout has 4ms+ jitter)
+    while (performance.now() - start < chipMs) {
+      // spin
+    }
+  }
+
+  // 300ms dark tail
+  document.body.classList.remove('flash-on');
+  document.body.classList.add('flash-off');
+  await sleep(300);
+
+  // Done — restore UI
+  document.body.classList.remove('flash-on', 'flash-off');
+  btn.disabled = false;
+  btn.textContent = '▶ TRANSMIT';
+  status.textContent = `✓ Done — "${text}" sent (${chips.length} chips)`;
+  transmitting = false;
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+// Keyboard shortcut: Enter to transmit
+document.getElementById('message').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') transmit();
+});
+</script>
+</body>
+</html>

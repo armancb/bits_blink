@@ -28,8 +28,8 @@ List<int>? rsCorrectMessage(List<int> messageIn, int nsym) {
   List<int> erasePos = [];
   for (int i = 0; i < messageOut.length; i++) {
     if (messageOut[i] < 0) {
-      messageOut[i] = 0;   // placeholder for GF arithmetic
-      erasePos.add(i);     // record the position
+      messageOut[i] = 0; // placeholder for GF arithmetic
+      erasePos.add(i); // record the position
     }
   }
 
