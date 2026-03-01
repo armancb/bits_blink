@@ -5,12 +5,12 @@ import 'package:flutter/services.dart';
 import '../services/dsp_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
+import 'chat_screen.dart';
 
-/// High-speed oscilloscope debug screen for the optical modem receiver.
+/// Receiver home screen — oscilloscope + decoded message display.
 ///
-/// Receives raw `intensities` (row brightness 0-255) and `bits` (1s/0s)
-/// from the native headless pipeline, visualises them as a waveform, and
-/// feeds every frame into [DSPService] for decoding.
+/// Light-themed to match the transmitter UI. Camera stays open between
+/// SFD and EFD sync words for continuous frame capture and decoding.
 class DebugCaptureScreen extends StatefulWidget {
   const DebugCaptureScreen({super.key});
 
@@ -28,13 +28,9 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
   String? _error;
   int _frameCount = 0;
 
-  // Scrollable log of received bit strings
-  final List<String> _bitLog = [];
-  final _logScrollController = ScrollController();
-
   // ── DSP Receiver ──
   late DSPService _dspService;
-  String? _decodedMessage;
+  final List<String> _decodedMessages = [];
   String? _rxStatus;
 
   @override
@@ -47,26 +43,19 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
     _dspService = DSPService(
       onPreambleFound: (index) {
         if (!mounted) return;
-        setState(() => _rxStatus = '🚨 PREAMBLE LOCKED @ chip $index');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('🚨 BINGO! Preamble locked at chip $index'),
-            backgroundColor: Colors.orange.shade800,
-            duration: const Duration(seconds: 2),
-          ),
-        );
+        setState(() => _rxStatus = '🚨 SFD LOCKED @ chip $index');
       },
       onPacketDecoded: (text) {
         if (!mounted) return;
         setState(() {
-          _decodedMessage = text;
+          _decodedMessages.add(text);
           _rxStatus = '✅ DECODED: "$text"';
         });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('✅ Decoded: "$text"'),
-            backgroundColor: Colors.green.shade700,
-            duration: const Duration(seconds: 4),
+            backgroundColor: AppColors.primary,
+            duration: const Duration(seconds: 3),
           ),
         );
       },
@@ -80,7 +69,6 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
   @override
   void dispose() {
     _stopStream();
-    _logScrollController.dispose();
     super.dispose();
   }
 
@@ -89,8 +77,6 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
       _streaming = true;
       _error = null;
       _frameCount = 0;
-      _bitLog.clear();
-      _decodedMessage = null;
       _rxStatus = null;
     });
     _dspService.reset();
@@ -105,7 +91,7 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
         );
         final bits = List<int>.from(map['bits'] as List);
 
-        // Build a compact bit string for the log
+        // Build a compact bit string for DSP
         final bitStr = bits.join();
 
         // ── ALWAYS feed DSPService (signal processing runs at full speed) ──
@@ -113,24 +99,13 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
 
         _frameCount++;
 
-        // ── Throttle UI: only update the waveform + log every 5th frame ──
+        // ── Throttle UI: only update the waveform every 5th frame ──
         if (_frameCount % 5 == 0 || _frameCount == 1) {
           setState(() {
             _intensities = intensities;
             _bits = bits;
-            _bitLog.add('#$_frameCount  $bitStr');
-            if (_bitLog.length > 100) _bitLog.removeAt(0);
-          });
-
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (_logScrollController.hasClients) {
-              _logScrollController.jumpTo(
-                _logScrollController.position.maxScrollExtent,
-              );
-            }
           });
         } else {
-          // Still update the waveform (cheap repaint) but skip log rebuild
           setState(() {
             _intensities = intensities;
             _bits = bits;
@@ -161,51 +136,40 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.hudBackground,
-      appBar: AppBar(
-        title: const Text(
-          'OSCILLOSCOPE',
-          style: TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 2.0,
-            color: Colors.white70,
-          ),
-        ),
-        backgroundColor: AppColors.hudBackground,
-        iconTheme: const IconThemeData(color: Colors.white70),
-        elevation: 0,
-      ),
+      backgroundColor: AppColors.scaffoldBackground,
       body: Column(
         children: [
+          // ── Header ──
+          _buildHeader(context),
+
           // ── Start / Stop button ──
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
             child: SizedBox(
               width: double.infinity,
-              height: 44,
+              height: 48,
               child: ElevatedButton.icon(
                 onPressed: _streaming ? _stopStream : _startStream,
                 icon: Icon(
-                  _streaming ? Icons.stop : Icons.play_arrow,
-                  size: 20,
+                  _streaming ? Icons.stop_rounded : Icons.sensors_rounded,
+                  size: 22,
                 ),
                 label: Text(
-                  _streaming ? 'STOP STREAM' : 'START STREAM',
+                  _streaming ? 'STOP RECEIVER' : 'START RECEIVER',
                   style: const TextStyle(
-                    fontFamily: 'monospace',
                     fontWeight: FontWeight.w700,
-                    letterSpacing: 1.5,
+                    letterSpacing: 1.2,
+                    fontSize: 14,
                   ),
                 ),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: _streaming
-                      ? Colors.redAccent
-                      : AppColors.primary,
+                  backgroundColor:
+                      _streaming ? Colors.red.shade400 : AppColors.primary,
                   foregroundColor: Colors.white,
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(12),
                   ),
+                  elevation: _streaming ? 0 : 2,
                 ),
               ),
             ),
@@ -218,6 +182,57 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
     );
   }
 
+  Widget _buildHeader(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(20, 16, 12, 16),
+      decoration: const BoxDecoration(
+        color: AppColors.scaffoldBackground,
+        border: Border(
+          bottom: BorderSide(color: AppColors.inputBorder, width: 0.5),
+        ),
+      ),
+      child: SafeArea(
+        bottom: false,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            // ── Branding ──
+            const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('BITSBlink', style: AppTextStyles.headerTitle),
+                SizedBox(height: 2),
+                Text(
+                  'OPTICAL MODEM RECEIVER',
+                  style: AppTextStyles.headerSubtitle,
+                ),
+              ],
+            ),
+
+            // ── Navigate to Transmitter ──
+            TextButton.icon(
+              icon:
+                  const Icon(Icons.send_rounded, size: 18, color: AppColors.primary),
+              label: const Text(
+                'Transmit',
+                style: TextStyle(
+                  color: AppColors.primary,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const ChatScreen()),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildContent() {
     if (_error != null) {
       return Center(
@@ -226,15 +241,11 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
-                Icons.error_outline,
-                color: Colors.redAccent,
-                size: 48,
-              ),
+              Icon(Icons.error_outline, color: Colors.red.shade400, size: 48),
               const SizedBox(height: 12),
               Text(
                 _error!,
-                style: const TextStyle(color: Colors.redAccent, fontSize: 14),
+                style: TextStyle(color: Colors.red.shade400, fontSize: 14),
                 textAlign: TextAlign.center,
               ),
             ],
@@ -249,29 +260,36 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
           // ── Info bar ──
           Container(
             width: double.infinity,
-            margin: const EdgeInsets.symmetric(horizontal: 16),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            margin: const EdgeInsets.symmetric(horizontal: 20),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.05),
+              color: AppColors.inputBackground,
               borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(8),
+                top: Radius.circular(12),
               ),
             ),
             child: Row(
               children: [
                 Icon(
-                  _streaming ? Icons.fiber_manual_record : Icons.check_circle,
-                  color: _streaming ? Colors.redAccent : AppColors.hudAccent,
-                  size: 14,
+                  _streaming
+                      ? Icons.fiber_manual_record
+                      : Icons.check_circle,
+                  color:
+                      _streaming ? Colors.red.shade400 : AppColors.statusOnline,
+                  size: 12,
                 ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     '${_streaming ? "LIVE" : "STOPPED"}  •  '
                     'F#$_frameCount  •  '
-                    '${_intensities.length} rows  •  '
-                    '${_bits.length} bits',
-                    style: AppTextStyles.hudLog,
+                    '${_intensities.length} rows',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontFamily: 'monospace',
+                      color: Colors.grey.shade600,
+                      fontWeight: FontWeight.w500,
+                    ),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -281,18 +299,22 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
 
           // ── Oscilloscope Waveform ──
           Container(
-            height: 250,
-            margin: const EdgeInsets.symmetric(horizontal: 16),
+            height: 200,
+            margin: const EdgeInsets.symmetric(horizontal: 20),
             decoration: BoxDecoration(
               color: const Color(0xFF0A0E14),
               border: Border.all(
-                color: Colors.greenAccent.withValues(alpha: 0.3),
-                width: 1.5,
+                color: Colors.grey.shade300,
+                width: 1,
               ),
-              borderRadius: BorderRadius.circular(4),
+              borderRadius: const BorderRadius.vertical(
+                bottom: Radius.circular(12),
+              ),
             ),
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(3),
+              borderRadius: const BorderRadius.vertical(
+                bottom: Radius.circular(11),
+              ),
               child: CustomPaint(
                 painter: WaveformPainter(
                   intensities: _intensities,
@@ -303,135 +325,188 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
             ),
           ),
 
-          const SizedBox(height: 4),
+          const SizedBox(height: 12),
 
           // ── RX Pipeline Status ──
           if (_rxStatus != null)
             Container(
               width: double.infinity,
-              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
-                color: _decodedMessage != null
-                    ? Colors.green.withValues(alpha: 0.15)
-                    : Colors.orange.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(6),
+                color: _rxStatus!.startsWith('✅')
+                    ? Colors.green.shade50
+                    : _rxStatus!.startsWith('❌')
+                        ? Colors.red.shade50
+                        : Colors.orange.shade50,
+                borderRadius: BorderRadius.circular(10),
                 border: Border.all(
-                  color: _decodedMessage != null
-                      ? Colors.green.withValues(alpha: 0.4)
-                      : Colors.orange.withValues(alpha: 0.4),
+                  color: _rxStatus!.startsWith('✅')
+                      ? Colors.green.shade200
+                      : _rxStatus!.startsWith('❌')
+                          ? Colors.red.shade200
+                          : Colors.orange.shade200,
                 ),
               ),
               child: Text(
                 _rxStatus!,
                 style: TextStyle(
-                  color: _decodedMessage != null
-                      ? Colors.greenAccent
-                      : Colors.orangeAccent,
-                  fontSize: 12,
+                  color: _rxStatus!.startsWith('✅')
+                      ? Colors.green.shade700
+                      : _rxStatus!.startsWith('❌')
+                          ? Colors.red.shade700
+                          : Colors.orange.shade700,
+                  fontSize: 13,
                   fontFamily: 'monospace',
                   fontWeight: FontWeight.w600,
                 ),
               ),
             ),
 
-          // ── Decoded Message Card ──
-          if (_decodedMessage != null)
-            Container(
-              width: double.infinity,
-              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    Colors.green.withValues(alpha: 0.2),
-                    Colors.teal.withValues(alpha: 0.1),
-                  ],
-                ),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color: Colors.greenAccent.withValues(alpha: 0.3),
-                ),
-              ),
-              child: Row(
-                children: [
-                  const Icon(
-                    Icons.check_circle_outline,
-                    color: Colors.greenAccent,
-                    size: 20,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _decodedMessage!,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+          const SizedBox(height: 8),
 
-          // ── Binary data scrolling log ──
+          // ── Decoded Messages ──
           Expanded(
             child: Container(
               width: double.infinity,
-              margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              padding: const EdgeInsets.all(8),
+              margin: const EdgeInsets.fromLTRB(20, 0, 20, 16),
               decoration: BoxDecoration(
-                color: const Color(0xFF0A0E14),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+                color: AppColors.inputBackground,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppColors.inputBorder),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      const Icon(
-                        Icons.terminal,
-                        color: Colors.greenAccent,
-                        size: 14,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        'DEMODULATED BITS',
-                        style: TextStyle(
-                          color: Colors.greenAccent.withValues(alpha: 0.8),
-                          fontSize: 11,
-                          fontFamily: 'monospace',
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 1.5,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Divider(
-                    color: Colors.white.withValues(alpha: 0.1),
-                    height: 1,
-                  ),
-                  const SizedBox(height: 4),
-                  Expanded(
-                    child: ListView.builder(
-                      controller: _logScrollController,
-                      itemCount: _bitLog.length,
-                      itemBuilder: (context, index) {
-                        return Text(
-                          _bitLog[index],
-                          style: const TextStyle(
-                            color: Colors.greenAccent,
-                            fontSize: 10,
-                            fontFamily: 'monospace',
-                            height: 1.4,
-                          ),
-                        );
-                      },
+                  // Title bar
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
                     ),
+                    decoration: BoxDecoration(
+                      color: AppColors.scaffoldBackground,
+                      borderRadius: const BorderRadius.vertical(
+                        top: Radius.circular(12),
+                      ),
+                      border: Border(
+                        bottom: BorderSide(color: AppColors.inputBorder),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.message_rounded,
+                          color: AppColors.primary,
+                          size: 16,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          'RECEIVED MESSAGES',
+                          style: TextStyle(
+                            color: AppColors.primaryDark,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 1.5,
+                          ),
+                        ),
+                        const Spacer(),
+                        if (_decodedMessages.isNotEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppColors.primary.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              '${_decodedMessages.length}',
+                              style: TextStyle(
+                                color: AppColors.primary,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+
+                  // Messages list
+                  Expanded(
+                    child: _decodedMessages.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.inbox_rounded,
+                                  color: Colors.grey.shade300,
+                                  size: 40,
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  'No messages received yet',
+                                  style: TextStyle(
+                                    color: Colors.grey.shade400,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        : ListView.separated(
+                            padding: const EdgeInsets.all(12),
+                            itemCount: _decodedMessages.length,
+                            separatorBuilder: (_, _) =>
+                                const SizedBox(height: 8),
+                            itemBuilder: (context, index) {
+                              return Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 10,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: Colors.grey.shade200,
+                                  ),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.black.withValues(alpha: 0.04),
+                                      blurRadius: 4,
+                                      offset: const Offset(0, 1),
+                                    ),
+                                  ],
+                                ),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Icon(
+                                      Icons.arrow_downward_rounded,
+                                      color: AppColors.primary,
+                                      size: 16,
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Text(
+                                        _decodedMessages[index],
+                                        style: const TextStyle(
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w500,
+                                          color: AppColors.textOnReceived,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
                   ),
                 ],
               ),
@@ -447,17 +522,16 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(
-            Icons.show_chart,
-            color: Colors.white.withValues(alpha: 0.15),
+            Icons.sensors_rounded,
+            color: Colors.grey.shade300,
             size: 64,
           ),
           const SizedBox(height: 12),
           Text(
-            'Tap START STREAM to begin\nheadless oscilloscope feed',
+            'Tap START RECEIVER to begin\nlistening for optical signals',
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.3),
+              color: Colors.grey.shade400,
               fontSize: 14,
-              fontFamily: 'monospace',
             ),
             textAlign: TextAlign.center,
           ),

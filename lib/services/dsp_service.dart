@@ -6,57 +6,71 @@ import '../reed_solomon/galois_field.dart';
 import '../reed_solomon/reed_solomon.dart';
 
 /// Receiver state machine phases.
-enum _RxState { hunting, locked, receiving }
+enum _RxState { hunting, receiving }
 
 /// DSP (Digital Signal Processing) Service for the 4-PPM optical modem
-/// receiver pipeline, based on the U-Flash adaptive threshold architecture
-/// (ACM 10.1145/3699769).
+/// receiver pipeline.
 ///
 /// This is a **stateful** service: call [feedFrame] with every raw bitstring
-/// from the native EventChannel, and it will accumulate data across frames,
-/// downsample, hunt for the preamble, demodulate 4-PPM symbols, RS-decode,
-/// and fire callbacks when a packet is fully recovered.
+/// from the native EventChannel. It will hunt for the preamble using
+/// frame-level correlation (robust to jitter), then extract payload chips
+/// at the recovered clock rate, RS-decode, and fire callbacks.
 class DSPService {
   // ── Protocol constants ──────────────────────────────────────────────
 
   /// Camera rows per flash slot (oversampling factor).
   /// Auto-calibrated from first frame if set to 0.
-  /// Formula: (chipDurationMs / frameDurationMs) × imageHeight
   int samplesPerSlot;
 
-  /// 4-PPM chip representation of the 0xAA (10101010) preamble byte.
-  /// Each di-bit pair (10) maps to chip pattern 0010, repeated 4 times.
-  static const String preambleChips = '0010001000100010';
+  /// 4-PPM chip representation of the SFD (0xAA 0xAA = two bytes).
+  static const String sfdChips = '00100010001000100010001000100010';
+
+  /// 4-PPM chip representation of the EFD (0x55 0x55 = two bytes).
+  static const String efdChips = '00010100010001000001010001000100';
 
   /// Reverse look-up: position of the '1' in a 4-chip symbol → di-bit.
   static const List<String> _ppmDecode = ['00', '01', '10', '11'];
 
   // ── Callbacks ───────────────────────────────────────────────────────
 
-  /// Fired when the preamble is first detected.
   final void Function(int chipIndex)? onPreambleFound;
-
-  /// Fired when a complete packet has been RS-decoded to UTF-8 text.
   final void Function(String decodedText)? onPacketDecoded;
-
-  /// Fired when an unrecoverable error occurs (RS failure, etc.).
   final void Function(String message)? onError;
-
-  /// Fired on every frame with the current compressed chip string (for
-  /// debug display).
   final void Function(String chips)? onChipsUpdated;
 
   // ── Internal state ──────────────────────────────────────────────────
 
   final StringBuffer _chipAccumulator = StringBuffer();
+
   _RxState _state = _RxState.hunting;
   int _preambleIndex = -1;
-  int _payloadLength = -1; // data bytes (from the length header)
+  int _payloadLength = -1;
   bool _rsTablesReady = false;
 
-  // Carry-over state for cross-frame boundary runs.
+  // ── Carry-over state (incremental RLE across frame boundaries) ─────
   String _lastChar = '';
   int _pendingRunLength = 0;
+
+  // ── Burst tracking ─────────────────────────────────────────────────
+  bool _inBurst = false;
+  int _silentFrameCount = 0;
+  // 4-PPM worst case: 6 consecutive OFF chips across byte boundaries
+  // = 12 frames at 2 frames/chip. Add margin for jitter → 25.
+  static const int _maxSilentFrames = 25;
+
+  // ── Receiving timeout ──────────────────────────────────────────────
+  int _receivingFrameCount = 0;
+  int _maxReceivingFrames = 600;
+
+  // ── Frame-level vote buffer ────────────────────────────────────────
+  // One entry per frame (0 = OFF, 1 = ON). Used for robust preamble
+  // hunting via frame-rate correlation, bypassing RLE chip conversion.
+  final List<int> _frameVotes = [];
+  int _preambleFrameStart = -1;
+  double _calibratedFpc = 2.0; // frames-per-chip, recovered from preamble
+  bool _frameLevelLock = false;
+  bool _homogeneousFrames = true; // tracks if all frames are homogeneous
+  static const int _maxPreBurstVotes = 100; // keep recent silence for preamble leading zeros
 
   DSPService({
     this.samplesPerSlot = 0, // 0 = auto-calibrate from first frame
@@ -68,35 +82,29 @@ class DSPService {
 
   // ── Public API ──────────────────────────────────────────────────────
 
-  /// Feed one frame's worth of raw oversampled bits (e.g. 480 chars of
-  /// '1's and '0's) from the native camera pipeline.
-  ///
-  /// Each frame is downsampled individually (~34 chips) and the chips
-  /// are appended to an internal accumulator to avoid O(n²) growth.
-  /// Diagnostic: count frames for periodic logging.
   int _feedFrameCount = 0;
 
   void feedFrame(String rawBits) {
+    if (rawBits.isEmpty) return;
+
     // Auto-calibrate samplesPerSlot from actual camera row count.
-    // The transmitter is sending 15ms chips.
-    if (samplesPerSlot == 0 && rawBits.isNotEmpty) {
-      const targetChipMs = 15.0;
-      const frameMs = 33.0;
-      samplesPerSlot = (targetChipMs / frameMs * rawBits.length).round();
+    // When frames are homogeneous (all-1 or all-0), each frame is one
+    // "slot" in RLE terms. Set samplesPerSlot = rows in one frame so
+    // that one homogeneous frame → 1 chip in the RLE path.
+    if (samplesPerSlot == 0) {
+      samplesPerSlot = rawBits.length;
       debugPrint(
         '📐 Auto-calibrated samplesPerSlot = $samplesPerSlot '
-        '(${rawBits.length} rows, ${targetChipMs}ms target chips)',
+        '(${rawBits.length} rows per frame)',
       );
     }
 
-    // ── Debug: Log signal frames + periodic heartbeat ──
     _feedFrameCount++;
     final bool hasSignal = rawBits.contains('1');
     final bool isHeartbeat = _feedFrameCount % 30 == 1;
-    final bool shouldLog = hasSignal || isHeartbeat;
 
-    if (shouldLog && rawBits.isNotEmpty) {
-      // Compute RLE of the raw bit string to see actual run lengths
+    // ── Debug logging ──
+    if (hasSignal || isHeartbeat) {
       final runs = <String>[];
       int runStart = 0;
       for (int i = 1; i <= rawBits.length; i++) {
@@ -105,7 +113,6 @@ class DSPService {
           runStart = i;
         }
       }
-      // Show first 10 runs to avoid flooding
       final preview = runs.take(10).join(', ');
       final tag = hasSignal ? '🔴 SIGNAL' : '📊';
       debugPrint(
@@ -114,51 +121,109 @@ class DSPService {
       );
     }
 
-    // Skip all-zero frames: don't let silence accumulate as carry-over.
-    // Without this, 35 silent frames = 68,000 zeros → 165 spurious '0' chips
-    // when signal finally appears.
-    final bool isAllZero = !rawBits.contains('1');
-    if (isAllZero) {
-      // Reset carry-over: silence is not data.
-      if (_lastChar == '0') {
-        _pendingRunLength = 0;
-      }
+    // ── Burst tracking ──
+    if (hasSignal) {
+      _silentFrameCount = 0;
+      _inBurst = true;
+    } else {
+      _silentFrameCount++;
     }
 
-    final newChips = _downsampleFrame(rawBits);
-    _chipAccumulator.write(newChips);
+    // ── ALWAYS record frame vote (including pre-burst silence) ──
+    // The preamble starts with leading zeros that occur BEFORE the first
+    // ON frame. Without these zeros, the frame-level correlator can never
+    // align the template correctly.
+    _frameVotes.add(hasSignal ? 1 : 0);
 
-    if (shouldLog) {
+    // Trim pre-burst buffer to avoid unbounded growth during long silence.
+    if (!_inBurst && _frameVotes.length > _maxPreBurstVotes) {
+      _frameVotes.removeRange(0, _frameVotes.length - _maxPreBurstVotes);
+    }
+
+    // If we haven't seen any signal yet, skip RLE processing.
+    if (!_inBurst) {
+      if (isHeartbeat) {
+        debugPrint(
+          '📊 F#$_feedFrameCount → skipped (no burst), '
+          'chips=${_chipAccumulator.length}, state=$_state',
+        );
+      }
+      return;
+    }
+
+    // If silence exceeded threshold, end the burst.
+    if (_silentFrameCount > _maxSilentFrames) {
+      if (_pendingRunLength > 0) {
+        _emitRun(_chipAccumulator, _lastChar, _pendingRunLength);
+        _pendingRunLength = 0;
+        _lastChar = '';
+      }
+      _inBurst = false;
+
+      if (_state == _RxState.receiving) {
+        debugPrint(
+          '⏰ Burst ended while receiving — payload incomplete, resetting',
+        );
+        onError?.call('Reception timeout: burst ended before payload complete');
+        reset();
+      }
+
+      if (isHeartbeat) {
+        debugPrint(
+          '📊 F#$_feedFrameCount → burst ended after $_maxSilentFrames '
+          'silent frames, chips=${_chipAccumulator.length}',
+        );
+      }
+      return;
+    }
+
+    // ── Process this frame incrementally (carry-over RLE) ──
+    _downsampleFrame(rawBits);
+
+    final chips = _snapshotChips();
+
+    if (hasSignal || isHeartbeat) {
       debugPrint(
-        '📊 F#$_feedFrameCount → ${newChips.length} new chips, '
-        'buf=${_chipAccumulator.length} total, '
-        'samplesPerSlot=$samplesPerSlot, state=$_state',
+        '📊 F#$_feedFrameCount → ${chips.length} chips, '
+        'pending=${_pendingRunLength}$_lastChar, state=$_state',
       );
     }
 
-    // Safety cap: prevent unbounded growth if no preamble is ever found.
-    // 10 000 chips ≈ 300 frames ≈ enough for any reasonable packet.
-    if (_state == _RxState.hunting && _chipAccumulator.length > 10000) {
-      final str = _chipAccumulator.toString();
-      _chipAccumulator.clear();
-      // Keep only the last 2000 chips (sliding window).
-      _chipAccumulator.write(str.substring(str.length - 2000));
-    }
-
-    // Build a "preview" chip string that includes the pending
-    // (not-yet-flushed) run, so the state machine sees the full picture.
-    final pendingPreview = _previewPendingRun();
-    final chips = '${_chipAccumulator.toString()}$pendingPreview';
     onChipsUpdated?.call(chips);
 
+    // ── Safety cap (hunting mode only) ──
+    if (_state == _RxState.hunting && chips.length > 5000) {
+      final trimmed = chips.substring(chips.length - 2000);
+      _chipAccumulator.clear();
+      _chipAccumulator.write(trimmed);
+      _triedPositions.clear();
+    }
+
+    // ── State machine ──
     switch (_state) {
       case _RxState.hunting:
-        _huntPreamble(chips);
-      case _RxState.locked:
-        // locked state is handled inside _huntPreamble (two-stage)
-        _huntPreamble(chips);
+        // Frame-level hunting (robust to jitter, preferred for camera data)
+        _huntPreambleFrameLevel();
+        // Only fall back to chip-level for NON-homogeneous data (tests)
+        if (_state == _RxState.hunting && !_homogeneousFrames) {
+          _huntPreamble(chips);
+        }
       case _RxState.receiving:
-        _collectPayload(chips);
+        _receivingFrameCount++;
+        if (_receivingFrameCount > _maxReceivingFrames) {
+          debugPrint(
+            '⏰ Receiving timeout after $_receivingFrameCount frames '
+            '(max=$_maxReceivingFrames) — resetting',
+          );
+          onError?.call('Reception timeout: too many frames without payload');
+          reset();
+          return;
+        }
+        if (_frameLevelLock) {
+          _collectPayloadFrameLevel();
+        } else {
+          _collectPayload(chips);
+        }
     }
   }
 
@@ -170,62 +235,77 @@ class DSPService {
     _payloadLength = -1;
     _lastChar = '';
     _pendingRunLength = 0;
+    _inBurst = false;
+    _silentFrameCount = 0;
+    _receivingFrameCount = 0;
+    _maxReceivingFrames = 600;
     _triedPositions.clear();
+    _feedFrameCount = 0;
+    _frameVotes.clear();
+    _preambleFrameStart = -1;
+    _calibratedFpc = 2.0;
+    _frameLevelLock = false;
+    _decodeAttempts = 0;
+    _homogeneousFrames = true;
   }
 
-  // ── Step 1: Downsampling (RLE → chips), one frame at a time ─────────
+  // ── Step 1: Incremental downsampling (carry-over RLE) ───────────────
 
-  /// Downsample a single frame's raw bits into chips, carrying over
-  /// any incomplete run from the previous frame so that flashes
-  /// spanning frame boundaries are handled correctly.
-  String _downsampleFrame(String rawBits) {
-    if (rawBits.isEmpty) return '';
+  void _downsampleFrame(String rawBits) {
+    final firstChar = rawBits[0];
+    bool homogeneous = true;
+    final step = rawBits.length > 100 ? rawBits.length ~/ 10 : 1;
+    for (int i = step; i < rawBits.length; i += step) {
+      if (rawBits[i] != firstChar) {
+        homogeneous = false;
+        break;
+      }
+    }
 
-    final StringBuffer compressed = StringBuffer();
+    if (homogeneous) {
+      if (_lastChar.isEmpty || _lastChar == firstChar) {
+        _lastChar = firstChar;
+        _pendingRunLength += rawBits.length;
+      } else {
+        _emitRun(_chipAccumulator, _lastChar, _pendingRunLength);
+        _lastChar = firstChar;
+        _pendingRunLength = rawBits.length;
+      }
+      return;
+    }
 
+    _homogeneousFrames = false; // enable chip-level fallback for test data
     for (int i = 0; i < rawBits.length; i++) {
       final c = rawBits[i];
-
       if (_lastChar.isEmpty) {
-        // First character ever seen.
         _lastChar = c;
         _pendingRunLength = 1;
       } else if (c == _lastChar) {
         _pendingRunLength++;
       } else {
-        // Character changed → emit the completed run.
-        _emitRun(compressed, _lastChar, _pendingRunLength);
+        _emitRun(_chipAccumulator, _lastChar, _pendingRunLength);
         _lastChar = c;
         _pendingRunLength = 1;
       }
     }
-
-    // DO NOT flush the pending run here — it may continue into the
-    // next frame. It will be flushed when the character changes or
-    // when reset() is called.
-
-    return compressed.toString();
   }
 
-  /// Preview what the pending (not-yet-flushed) run would produce,
-  /// WITHOUT resetting the carry-over state.
-  String _previewPendingRun() {
+  String _snapshotChips() {
     if (_pendingRunLength > 0 && _lastChar.isNotEmpty) {
-      final buf = StringBuffer();
-      _emitRun(buf, _lastChar, _pendingRunLength);
-      return buf.toString();
+      final preview = StringBuffer();
+      _emitRun(preview, _lastChar, _pendingRunLength);
+      return '${_chipAccumulator.toString()}${preview.toString()}';
     }
-    return '';
+    return _chipAccumulator.toString();
   }
 
-  /// Quantise one run into chip-rate slots and append to [buffer].
   void _emitRun(StringBuffer buffer, String char, int runLength) {
     int slots = (runLength / samplesPerSlot).round();
 
-    // Guard: only force a slot for runs that are at least 40% of a chip.
-    // This prevents noise bursts from becoming spurious chips.
-    final minRunForChip = (samplesPerSlot * 0.4).round();
-    if (runLength >= minRunForChip && slots == 0) {
+    final minRunForChip = (samplesPerSlot * 0.6).round();
+    if (runLength < minRunForChip) {
+      slots = 0;
+    } else if (runLength >= minRunForChip && slots == 0) {
       slots = 1;
     }
 
@@ -234,67 +314,234 @@ class DSPService {
     }
   }
 
-  // ── Step 2: Preamble hunting (correlation-based fuzzy match) ────────
+  // ── Frame-level preamble hunting (robust to jitter) ─────────────────
 
-  /// Stage 1 threshold: 75% = 12/16 chips match.
-  /// Stage 2 validates by checking the length header for sanity.
-  static const double _preambleThreshold = 0.75;
+  /// Extracts chip values from frame votes using majority voting over
+  /// a window of [fpc] frames per chip.
+  int _voteChip(int frameStart, double fpc) {
+    int ones = 0;
+    int total = 0;
+    final fpcInt = fpc.round();
+    for (int f = frameStart; f < frameStart + fpcInt && f < _frameVotes.length; f++) {
+      ones += _frameVotes[f];
+      total++;
+    }
+    if (total == 0) return 0;
+    return ones > total / 2 ? 1 : 0;
+  }
 
-  /// Positions already tried and rejected (false positives).
-  final Set<int> _triedPositions = {};
+  String _extractChipsFromFrameVotes(int startFrame, int numChips, double fpc) {
+    final buf = StringBuffer();
+    for (int c = 0; c < numChips; c++) {
+      final frameIdx = startFrame + (c * fpc).round();
+      buf.write(_voteChip(frameIdx, fpc));
+    }
+    return buf.toString();
+  }
 
-  void _huntPreamble(String chips) {
-    if (chips.length < preambleChips.length + 16)
-      return; // need room for header
+  void _huntPreambleFrameLevel() {
+    if (_frameVotes.length < 60) return; // need enough frames
 
-    int bestIdx = -1;
-    double bestScore = 0.0;
-    int bestWindowLen = preambleChips.length;
+    double bestScore = 0;
+    int bestStart = -1;
+    double bestFpc = 2.0;
+    int bestOnesMatched = 0;
 
-    // Slide the preamble template over the chip buffer.
-    for (int i = 0; i <= chips.length - preambleChips.length - 16; i++) {
-      if (_triedPositions.contains(i)) continue; // already rejected
+    // Try different frames-per-chip rates to handle TX/RX clock drift.
+    // Constrained to ±15% of the expected 2.0 fpc to avoid false matches.
+    for (double fpc = 1.8; fpc <= 2.3; fpc += 0.05) {
+      final templateFrames = (sfdChips.length * fpc).round();
+      // Need template + at least 32 frames for header validation
+      if (_frameVotes.length < templateFrames + 40) continue;
 
-      int matches = 0;
-      int onesMatched = 0;
-      for (int j = 0; j < preambleChips.length; j++) {
-        if (chips[i + j] == preambleChips[j]) {
-          matches++;
-          if (preambleChips[j] == '1') onesMatched++;
+      for (int start = 0; start <= _frameVotes.length - templateFrames - 40; start++) {
+        int matches = 0;
+        int onesMatched = 0;
+
+        for (int j = 0; j < sfdChips.length; j++) {
+          final expected = int.parse(sfdChips[j]);
+          final frameIdx = start + (j * fpc).round();
+          final actual = _voteChip(frameIdx, fpc);
+
+          if (actual == expected) {
+            matches++;
+            if (expected == 1) onesMatched++;
+          }
         }
-      }
-      final score = matches / preambleChips.length;
-      // Require at least 3 matching '1's (prevents solid zero blocks from scoring 75%)
-      if (score > bestScore && onesMatched >= 3) {
-        bestScore = score;
-        bestIdx = i;
-        bestWindowLen = preambleChips.length;
+
+        final score = matches / sfdChips.length;
+        // Require at least 6 of 8 SFD ON-chips to match
+        if (score > bestScore && onesMatched >= 6) {
+          bestScore = score;
+          bestStart = start;
+          bestFpc = fpc;
+          bestOnesMatched = onesMatched;
+        }
       }
     }
 
-    // Also try slightly stretched/compressed preamble windows (±2 chips)
-    // to handle rolling shutter jitter that adds or removes chips.
+    if (bestScore < _preambleThreshold) {
+      if (_feedFrameCount % 10 == 0 && bestScore > 0.0) {
+        debugPrint(
+          '🔍 Frame-level best: ${(bestScore * 100).toInt()}% '
+          'at frame $bestStart (fpc=${bestFpc.toStringAsFixed(2)}, '
+          'ones=$bestOnesMatched/8, votes=${_frameVotes.length})',
+        );
+      }
+      return;
+    }
+
+    // ── Validate: extract length header from frame votes ──
+    final headerStartFrame =
+        bestStart + (sfdChips.length * bestFpc).round();
+
+    for (final offsetFrames in [0, -1, 1, -2, 2]) {
+      final hStart = headerStartFrame + offsetFrames;
+      if (hStart < 0) continue;
+
+      final headerChips = _extractChipsFromFrameVotes(hStart, 16, bestFpc);
+      final headerBytes = _demodulateChips(headerChips);
+      if (headerBytes == null || headerBytes.isEmpty) continue;
+
+      final candidateLength = headerBytes[0];
+      if (candidateLength <= 0 || candidateLength > 20) continue;
+
+      // ── Commit frame-level lock ──
+      _preambleFrameStart = bestStart;
+      _calibratedFpc = bestFpc;
+      _payloadLength = candidateLength;
+      _state = _RxState.receiving;
+      _receivingFrameCount = 0;
+      _frameLevelLock = true;
+
+      const int rsParityCount = 8;
+      // Total payload chips: length(16) + (data+parity)*16 + EFD(32)
+      final totalPayloadChips = (1 + _payloadLength + rsParityCount) * 16 + efdChips.length;
+      _maxReceivingFrames = (totalPayloadChips * bestFpc * 1.5).round() + 200;
+
+      debugPrint(
+        '🚨 FRAME-LEVEL PREAMBLE LOCKED at frame $bestStart '
+        '(score: ${(bestScore * 100).toInt()}%, '
+        'fpc: ${bestFpc.toStringAsFixed(1)}, offset: $offsetFrames)',
+      );
+      debugPrint(
+        '📦 Length header decoded: $_payloadLength data bytes '
+        '(rx timeout: $_maxReceivingFrames frames)',
+      );
+      onPreambleFound?.call(bestStart);
+      _collectPayloadFrameLevel();
+      return;
+    }
+
+    debugPrint(
+      '🔍 Frame-level preamble at frame $bestStart '
+      '(${(bestScore * 100).toInt()}%) → header validation failed',
+    );
+  }
+
+  // ── Frame-level payload collection ──────────────────────────────────
+
+  void _collectPayloadFrameLevel() {
+    const int rsParityCount = 8;
+    // Total chips after SFD: length(16) + (data+parity)*16 + EFD(32)
+    final totalChipsAfterSfd = (1 + _payloadLength + rsParityCount) * 16 + efdChips.length;
+    final payloadStartFrame =
+        _preambleFrameStart + (sfdChips.length * _calibratedFpc).round();
+    final totalFramesNeeded =
+        payloadStartFrame + (totalChipsAfterSfd * _calibratedFpc).round();
+
+    if (_frameVotes.length < totalFramesNeeded) return;
+
+    // Extract all payload chips (header + data + parity + EFD)
+    final allChips = _extractChipsFromFrameVotes(
+      payloadStartFrame,
+      totalChipsAfterSfd,
+      _calibratedFpc,
+    );
+
+    // Skip the 16-chip length header
+    final dataParityChipsLength = (_payloadLength + rsParityCount) * 16;
+    final dataParityChips = allChips.substring(16, 16 + dataParityChipsLength);
+    final efdChipsRx = allChips.substring(16 + dataParityChipsLength);
+
+    debugPrint(
+      '📡 Frame-level payload received: ${dataParityChips.length} chips '
+      '(${_payloadLength + rsParityCount} bytes expected)',
+    );
+
+    // Validate EFD (0x55 0x55)
+    final efdDecoded = _demodulateChips(efdChipsRx);
+    if (efdDecoded != null && efdDecoded.length >= 2 &&
+        efdDecoded[0] == 0x55 && efdDecoded[1] == 0x55) {
+      debugPrint('🏁 EFD validated! (0x55 0x55)');
+    } else {
+      debugPrint('⚠️ EFD mismatch or erasure, trying to decode payload anyway...');
+    }
+
+    final demodBytes = _demodulateChips(dataParityChips);
+    if (demodBytes == null) {
+      onError?.call('4-PPM demodulation failed');
+      reset();
+      return;
+    }
+
+    debugPrint('🔢 Demodulated bytes: $demodBytes');
+    _decodeWithRS(demodBytes);
+  }
+
+  // ── Chip-level preamble hunting (fallback for non-homogeneous) ──────
+
+  static const double _preambleThreshold = 0.80;
+  final Set<int> _triedPositions = {};
+
+  void _huntPreamble(String chips) {
+    if (chips.length < sfdChips.length + 16) return;
+
+    int bestIdx = -1;
+    double bestScore = 0.0;
+    int bestWindowLen = sfdChips.length;
+
+    for (int i = 0; i <= chips.length - sfdChips.length - 16; i++) {
+      if (_triedPositions.contains(i)) continue;
+
+      int matches = 0;
+      int onesMatched = 0;
+      for (int j = 0; j < sfdChips.length; j++) {
+        if (chips[i + j] == sfdChips[j]) {
+          matches++;
+          if (sfdChips[j] == '1') onesMatched++;
+        }
+      }
+      final score = matches / sfdChips.length;
+      if (score > bestScore && onesMatched >= 7) {
+        bestScore = score;
+        bestIdx = i;
+        bestWindowLen = sfdChips.length;
+      }
+    }
+
+    // Also try stretched/compressed preamble windows (±2 chips).
     for (int stretch = -2; stretch <= 2; stretch++) {
-      if (stretch == 0) continue; // already checked
-      final windowLen = preambleChips.length + stretch;
-      if (windowLen < 8 || chips.length < windowLen + 16) continue;
+      if (stretch == 0) continue;
+      final windowLen = sfdChips.length + stretch;
+      if (windowLen < 16 || chips.length < windowLen + 16) continue;
 
       for (int i = 0; i <= chips.length - windowLen - 16; i++) {
         if (_triedPositions.contains(i)) continue;
 
-        // Map the window back to the 16-chip template using nearest-neighbor
         int matches = 0;
         int onesMatched = 0;
-        for (int j = 0; j < preambleChips.length; j++) {
-          final mappedIdx = i + (j * windowLen / preambleChips.length).round();
+        for (int j = 0; j < sfdChips.length; j++) {
+          final mappedIdx =
+              i + (j * windowLen / sfdChips.length).round();
           if (mappedIdx < chips.length &&
-              chips[mappedIdx] == preambleChips[j]) {
+              chips[mappedIdx] == sfdChips[j]) {
             matches++;
-            if (preambleChips[j] == '1') onesMatched++;
+            if (sfdChips[j] == '1') onesMatched++;
           }
         }
-        final score = matches / preambleChips.length;
-        if (score > bestScore && onesMatched >= 3) {
+        final score = matches / sfdChips.length;
+        if (score > bestScore && onesMatched >= 7) {
           bestScore = score;
           bestIdx = i;
           bestWindowLen = windowLen;
@@ -303,7 +550,6 @@ class DSPService {
     }
 
     if (bestScore < _preambleThreshold) {
-      // Log best score periodically for debugging
       if (_feedFrameCount % 30 == 0 && bestScore > 0.3) {
         debugPrint(
           '🔍 Best preamble score: ${(bestScore * 100).toInt()}% '
@@ -313,71 +559,84 @@ class DSPService {
       return;
     }
 
-    // ── Stage 2: Validate by checking the length header ──
     final headerStart = bestIdx + bestWindowLen;
-    if (chips.length < headerStart + 16) return;
 
-    final headerChips = chips.substring(headerStart, headerStart + 16);
-    final headerBytes = _demodulateChips(headerChips);
-    if (headerBytes == null || headerBytes.isEmpty) {
+    for (final offset in [0, -1, 1, -2, 2]) {
+      final hStart = headerStart + offset;
+      if (hStart < 0 || chips.length < hStart + 16) continue;
+
+      final headerChips = chips.substring(hStart, hStart + 16);
+      final headerBytes = _demodulateChips(headerChips);
+      if (headerBytes == null || headerBytes.isEmpty) continue;
+
+      final candidateLength = headerBytes[0];
+      if (candidateLength <= 0 || candidateLength > 20) continue;
+
+      _preambleIndex = bestIdx;
+      _payloadLength = candidateLength;
+      _state = _RxState.receiving;
+      _receivingFrameCount = 0;
+
+      const int rsParityCount = 8;
+      // Total payload chips: length(16) + (data+parity)*16 + EFD(32)
+      final totalPayloadChips = (1 + _payloadLength + rsParityCount) * 16 + efdChips.length;
+      _maxReceivingFrames = totalPayloadChips * 3 + 150;
+
       debugPrint(
-        '🔍 Preamble at idx $bestIdx (${(bestScore * 100).toInt()}%) '
-        '→ header demod failed, skipping',
+        '🚨 PREAMBLE LOCKED at idx $bestIdx '
+        '(score: ${(bestScore * 100).toInt()}%, '
+        'header offset: $offset)',
       );
-      _triedPositions.add(bestIdx);
+      debugPrint(
+        '📦 Length header decoded: $_payloadLength data bytes '
+        '(rx timeout: $_maxReceivingFrames frames)',
+      );
+      onPreambleFound?.call(bestIdx);
+
+      _collectPayload(chips);
       return;
     }
 
-    final candidateLength = headerBytes[0];
-    if (candidateLength <= 0 || candidateLength > 50) {
-      debugPrint(
-        '🔍 Preamble at idx $bestIdx (${(bestScore * 100).toInt()}%) '
-        '→ bad length $candidateLength, skipping',
-      );
-      _triedPositions.add(bestIdx);
-      return;
-    }
-
-    // Both stages passed — commit!
-    _preambleIndex = bestIdx;
-    _payloadLength = candidateLength;
-    _state = _RxState.receiving;
     debugPrint(
-      '🚨 PREAMBLE LOCKED at idx $bestIdx '
-      '(score: ${(bestScore * 100).toInt()}%)',
+      '🔍 Preamble at idx $bestIdx (${(bestScore * 100).toInt()}%) '
+      '→ header demod failed at all offsets, skipping',
     );
-    debugPrint('📦 Length header decoded: $_payloadLength data bytes');
-    onPreambleFound?.call(bestIdx);
-
-    // Immediately try to collect payload.
-    _collectPayload(chips);
+    _triedPositions.add(bestIdx);
   }
 
-  // ── Step 4: Payload collection + decode ─────────────────────────────
+  // ── Chip-level payload collection (fallback) ────────────────────────
 
   void _collectPayload(String chips) {
-    // Total packet bytes after the preamble:
-    //   1 (length header) + _payloadLength (data) + _payloadLength (RS parity)
-    // = 1 + 2 * _payloadLength
-    // Each byte = 4 PPM symbols = 16 chips.
-    final totalPayloadChips = (1 + 2 * _payloadLength) * 16;
-    final payloadStart = _preambleIndex + preambleChips.length;
+    const int rsParityCount = 8;
+    // Total payload chips: length(16) + (data+parity)*16 + EFD(32)
+    final totalPayloadChips = (1 + _payloadLength + rsParityCount) * 16 + efdChips.length;
+    final payloadStart = _preambleIndex + sfdChips.length;
 
-    if (chips.length < payloadStart + totalPayloadChips) return; // need more
+    if (chips.length < payloadStart + totalPayloadChips) return;
 
-    // Extract the data+parity chips (skip the 16-chip length header).
     final dataParityStart = payloadStart + 16;
+    final dataParityChipsLength = (_payloadLength + rsParityCount) * 16;
     final dataParityChips = chips.substring(
       dataParityStart,
-      dataParityStart + 2 * _payloadLength * 16,
+      dataParityStart + dataParityChipsLength,
     );
+    final efdStart = dataParityStart + dataParityChipsLength;
+    final efdChipsRx = chips.substring(efdStart, efdStart + efdChips.length);
 
     debugPrint(
       '📡 Payload fully received: ${dataParityChips.length} chips '
-      '(${2 * _payloadLength} bytes expected)',
+      '(${_payloadLength + rsParityCount} bytes expected)',
     );
 
-    // Demodulate 4-PPM → bytes (with erasure support).
+    // Validate EFD (0x55 0x55)
+    final efdDecoded = _demodulateChips(efdChipsRx);
+    if (efdDecoded != null && efdDecoded.length >= 2 &&
+        efdDecoded[0] == 0x55 && efdDecoded[1] == 0x55) {
+      debugPrint('🏁 EFD validated! (0x55 0x55)');
+    } else {
+      debugPrint('⚠️ EFD mismatch or erasure, trying to decode payload anyway...');
+    }
+
     final demodBytes = _demodulateChips(dataParityChips);
     if (demodBytes == null) {
       onError?.call('4-PPM demodulation failed');
@@ -386,23 +645,11 @@ class DSPService {
     }
 
     debugPrint('🔢 Demodulated bytes: $demodBytes');
-
-    // RS decode.
     _decodeWithRS(demodBytes);
   }
 
   // ── 4-PPM Demodulation ──────────────────────────────────────────────
 
-  /// Demodulates a chip string into bytes.
-  ///
-  /// Each 4-chip group maps the position of the '1' to a 2-bit di-pair:
-  ///   1000 → 00,  0100 → 01,  0010 → 10,  0001 → 11
-  ///
-  /// If a 4-chip group is `0000` (total dropout — e.g. bubble blocked the
-  /// flash), the corresponding _byte_ is marked as `-1` (erasure) so that
-  /// the Reed-Solomon decoder can use its more efficient erasure-correction
-  /// path (1 symbol per erasure vs 2 per error), as described in the
-  /// U-Flash paper's adaptive threshold demodulation scheme.
   static List<int>? _demodulateChips(String chips) {
     if (chips.length % 4 != 0) return null;
 
@@ -413,24 +660,20 @@ class DSPService {
 
     for (int i = 0; i < chips.length; i += 4) {
       final symbol = chips.substring(i, i + 4);
-
-      // Find the position of the '1'.
       final pos = symbol.indexOf('1');
 
       if (pos == -1) {
-        // No '1' found → erasure in this symbol.
         hasErasureInCurrentByte = true;
-        bitBuffer.write('00'); // placeholder bits
+        bitBuffer.write('00');
       } else {
         bitBuffer.write(_ppmDecode[pos]);
       }
 
       diBitCount++;
 
-      // Every 4 di-bits (4 PPM symbols) = 8 bits = 1 byte.
       if (diBitCount == 4) {
         if (hasErasureInCurrentByte) {
-          bytes.add(-1); // RS erasure marker
+          bytes.add(-1);
         } else {
           bytes.add(int.parse(bitBuffer.toString(), radix: 2));
         }
@@ -445,6 +688,25 @@ class DSPService {
 
   // ── Reed-Solomon Decode ─────────────────────────────────────────────
 
+  int _decodeAttempts = 0;
+  static const int _maxDecodeAttempts = 3;
+
+  /// On RS failure, go back to hunting mode (keeping frame buffer)
+  /// so the next copy's preamble can be found.
+  void _resumeHunting() {
+    _state = _RxState.hunting;
+    _preambleIndex = -1;
+    _payloadLength = -1;
+    _preambleFrameStart = -1;
+    _frameLevelLock = false;
+    _receivingFrameCount = 0;
+    _triedPositions.clear();
+    // Keep _frameVotes, _chipAccumulator, carry-over state, and burst state!
+    debugPrint(
+      '🔄 Resuming hunt for next copy (attempt ${_decodeAttempts + 1}/$_maxDecodeAttempts)',
+    );
+  }
+
   void _decodeWithRS(List<int> demodBytes) {
     if (!_rsTablesReady) {
       initTables();
@@ -454,18 +716,31 @@ class DSPService {
     final corrected = rsDecodePayload(demodBytes, _payloadLength);
 
     if (corrected == null) {
-      debugPrint('❌ RS decode FAILED — damage exceeds correction capacity');
-      onError?.call(
-        'Reed-Solomon decode failed: too many errors/erasures to correct',
+      _decodeAttempts++;
+      debugPrint(
+        '❌ RS decode FAILED (attempt $_decodeAttempts/$_maxDecodeAttempts) '
+        '— damage exceeds correction capacity',
       );
-      reset();
+
+      if (_decodeAttempts >= _maxDecodeAttempts) {
+        debugPrint('❌ All $_maxDecodeAttempts attempts exhausted — giving up');
+        onError?.call(
+          'Reed-Solomon decode failed after $_maxDecodeAttempts attempts',
+        );
+        reset();
+      } else {
+        // Go back to hunting — the next redundant copy may still be coming.
+        _resumeHunting();
+      }
       return;
     }
 
-    // Convert to UTF-8 text.
     try {
       final text = utf8.decode(corrected);
-      debugPrint('✅ DECODED MESSAGE: "$text"');
+      debugPrint(
+        '✅ DECODED MESSAGE: "$text" '
+        '(on attempt ${_decodeAttempts + 1})',
+      );
       onPacketDecoded?.call(text);
     } catch (e) {
       debugPrint('❌ UTF-8 decode failed: $e');

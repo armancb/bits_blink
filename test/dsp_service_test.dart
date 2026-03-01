@@ -47,11 +47,12 @@ void main() {
       final utf8Bytes = originalText.codeUnits; // [72, 105]
       final messageLength = utf8Bytes.length;
 
-      // RS encode with 1:1 parity
-      final rsEncoded = rsEncodeMessage(utf8Bytes, messageLength);
+      // RS encode with fixed 8 parity symbols (matching FourPpmService)
+      const int rsParityCount = 8;
+      final rsEncoded = rsEncodeMessage(utf8Bytes, rsParityCount);
 
-      // Build packet: [preamble=0xAA][length][data+parity]
-      final packet = <int>[0xAA, messageLength, ...rsEncoded];
+      // Build packet: [SFD=0xAA][SFD=0xAA][length][data+parity][EFD=0x55][EFD=0x55]
+      final packet = <int>[0xAA, 0xAA, messageLength, ...rsEncoded, 0x55, 0x55];
 
       // 4-PPM modulate the entire packet
       final chipsBuf = StringBuffer();
@@ -92,8 +93,9 @@ void main() {
     initTables();
 
     final utf8Bytes = 'A'.codeUnits; // single byte
-    final rsEncoded = rsEncodeMessage(utf8Bytes, 1);
-    final packet = <int>[0xAA, 1, ...rsEncoded];
+    const int rsParityCount = 8;
+    final rsEncoded = rsEncodeMessage(utf8Bytes, rsParityCount);
+    final packet = <int>[0xAA, 0xAA, 1, ...rsEncoded, 0x55, 0x55];
 
     final chipsBuf = StringBuffer();
     for (final byte in packet) {
@@ -134,8 +136,9 @@ void main() {
 
     final utf8Bytes = 'OK'.codeUnits;
     final messageLength = utf8Bytes.length;
-    final rsEncoded = rsEncodeMessage(utf8Bytes, messageLength);
-    final packet = <int>[0xAA, messageLength, ...rsEncoded];
+    const int rsParityCount = 8;
+    final rsEncoded = rsEncodeMessage(utf8Bytes, rsParityCount);
+    final packet = <int>[0xAA, 0xAA, messageLength, ...rsEncoded, 0x55, 0x55];
 
     final chipsBuf = StringBuffer();
     for (final byte in packet) {
@@ -144,9 +147,9 @@ void main() {
     var cleanChips = chipsBuf.toString();
 
     // Corrupt one data symbol: replace the first data chip group
-    // (after preamble + length = 32 chips) with '0000' (erasure).
+    // (after SFD(32) + length(16) = 48 chips) with '0000' (erasure).
     final corruptedChips =
-        '${cleanChips.substring(0, 32)}0000${cleanChips.substring(36)}';
+        '${cleanChips.substring(0, 48)}0000${cleanChips.substring(52)}';
     final withSilence = '${'0' * 56}$corruptedChips${'0' * 56}';
     final rawBits = oversample(withSilence, testSamplesPerSlot);
 

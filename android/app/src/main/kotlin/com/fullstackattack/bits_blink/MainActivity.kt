@@ -39,8 +39,8 @@ class MainActivity : FlutterActivity() {
     private var eventSink: EventChannel.EventSink? = null
     private val uiHandler = Handler(Looper.getMainLooper())
 
-    // Throttle: min interval between processed frames (~18 FPS)
-    private val minFrameIntervalMs = 55L
+    // Throttle: min interval between processed frames (~30 FPS)
+    private val minFrameIntervalMs = 33L
     private var lastFrameTimestamp = 0L
 
     // ROI smoothing: exponential moving average on bestX
@@ -67,7 +67,7 @@ class MainActivity : FlutterActivity() {
 
                         try {
                             // Chip duration configurable from Dart (default 5ms)
-                            val chipDurationMs = call.argument<Int>("chipDurationMs") ?: 15
+                            val chipDurationMs = call.argument<Int>("chipDurationMs") ?: 66
                             val chipDurationNs = chipDurationMs * 1_000_000L
 
                             for (state in signal) {
@@ -443,70 +443,23 @@ class MainActivity : FlutterActivity() {
                 rowAverages.add(rowSum.toDouble() / roiW)
             }
 
-            // ── Squelch: Minimum brightness gate ──
+            // ══════════════════════════════════════════════════════════
+            //  Frame-level brightness voting (simple squelch)
+            //
+            //  With 1ms exposure / ISO 100, background noise is well
+            //  below 25. Any frame where the brightest row exceeds
+            //  squelch means the flash is ON.
+            // ══════════════════════════════════════════════════════════
+
             val maxBrightness = rowAverages.maxOrNull() ?: 0.0
-            val squelchThreshold = 30.0
+            val squelchThreshold = 25.0
 
-            if (maxBrightness < squelchThreshold) {
-                for (i in rowAverages.indices) bits.add(0)
+            if (maxBrightness >= squelchThreshold) {
+                // Flash is ON during this frame.
+                for (i in rowAverages.indices) bits.add(1)
             } else {
-                // Sliding window adaptive threshold
-                val windowSize = 60
-                val minRowBrightness = 10.0  // Per-row noise gate
-                for (i in rowAverages.indices) {
-                    // Per-row gate: if this row is too dark, it's noise → force 0
-                    if (rowAverages[i] < minRowBrightness) {
-                        bits.add(0)
-                        continue
-                    }
-                    val wStart = maxOf(0, i - windowSize / 2)
-                    val wEnd   = minOf(rowAverages.size, i + windowSize / 2)
-                    var localSum = 0.0
-                    for (j in wStart until wEnd) localSum += rowAverages[j]
-                    val localThreshold = localSum / (wEnd - wStart)
-                    bits.add(if (rowAverages[i] >= localThreshold * 0.95) 1 else 0)
-                }
-            }
-
-            // ── Low-Pass Filter: Majority-vote sliding window ──
-            // Each bit becomes the majority of its neighbors.
-            // A 151-row window means a noise spike < 75 rows gets outvoted.
-            val lpfWindow = 151
-            if (bits.size > lpfWindow) {
-                val filtered = IntArray(bits.size)
-                val half = lpfWindow / 2
-
-                // Compute initial window sum for position 0
-                var windowSum = 0
-                for (j in 0 until minOf(lpfWindow, bits.size)) {
-                    windowSum += bits[j]
-                }
-                // Initial window covers [0, min(lpfWindow, size))
-                var wLeft = 0
-                var wRight = minOf(lpfWindow, bits.size)
-                var wSize = wRight - wLeft
-                filtered[0] = if (windowSum * 2 >= wSize) 1 else 0
-
-                for (i in 1 until bits.size) {
-                    // Slide window: ideally centered at i
-                    val newLeft = maxOf(0, i - half)
-                    val newRight = minOf(bits.size, i + half + 1)
-
-                    // Remove elements that left the window
-                    while (wLeft < newLeft) {
-                        windowSum -= bits[wLeft]
-                        wLeft++
-                    }
-                    // Add elements that entered the window
-                    while (wRight < newRight) {
-                        windowSum += bits[wRight]
-                        wRight++
-                    }
-                    wSize = wRight - wLeft
-                    filtered[i] = if (windowSum * 2 >= wSize) 1 else 0
-                }
-                bits.clear()
-                for (v in filtered) bits.add(v)
+                // Flash is OFF (or no flash visible).
+                for (i in rowAverages.indices) bits.add(0)
             }
 
             // ── Headless: Return raw data only (no Bitmap/JPEG) ──

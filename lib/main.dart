@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'screens/chat_screen.dart';
+import 'screens/debug_capture_screen.dart';
 
 void main() {
   runApp(const BitsBlinkApp());
@@ -18,7 +18,7 @@ class BitsBlinkApp extends StatelessWidget {
         useMaterial3: true,
         colorSchemeSeed: const Color(0xFF1B5E6B),
       ),
-      home: const ChatScreen(),
+      home: const DebugCaptureScreen(),
     );
   }
 }

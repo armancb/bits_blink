@@ -20,8 +20,11 @@ class FourPpmService {
     '11': '0001',
   };
 
-  /// Preamble byte (0xAA = 170) used to signal start of transmission.
-  static const int _preambleByte = 170;
+  /// Start Frame Delimiter byte (0xAA = 170).
+  static const int _sfdByte = 0xAA;
+
+  /// End Frame Delimiter byte (0x55 = 85).
+  static const int _efdByte = 0x55;
 
   static bool _tablesInitialised = false;
 
@@ -80,11 +83,13 @@ class FourPpmService {
       final utf8Bytes = utf8.encode(word);
       final messageLength = utf8Bytes.length;
 
-      // Step 2: RS encode with 1:1 parity (nsym = message length)
-      final rsEncoded = rsEncodeMessage(utf8Bytes, messageLength);
+      // Step 2: RS encode with fixed 8 parity symbols
+      // (can correct up to 4 errors or 8 erasures)
+      const int rsParityCount = 8;
+      final rsEncoded = rsEncodeMessage(utf8Bytes, rsParityCount);
 
-      // Step 3: Build final packet — [preamble][length][data + parity]
-      final packet = <int>[_preambleByte, messageLength, ...rsEncoded];
+      // Step 3: Build final packet — [SFD][SFD][length][data + parity][EFD][EFD]
+      final packet = <int>[_sfdByte, _sfdByte, messageLength, ...rsEncoded, _efdByte, _efdByte];
 
       // Step 4: Binary representation (for reference)
       final binaryStr = packet.map(_toBinary).join(' ');
@@ -127,30 +132,40 @@ class FourPpmService {
     debugPrint('═══════════════════════════════════════════════════');
     debugPrint('');
 
-    // Build the combined signal from all words.
+    // Build the signal from all words (single transmission, no redundancy).
     final allChips = <bool>[];
     for (final word in words) {
       final utf8Bytes = utf8.encode(word);
-      final rsEncoded = rsEncodeMessage(utf8Bytes, utf8Bytes.length);
-      final packet = <int>[_preambleByte, utf8Bytes.length, ...rsEncoded];
+      const int rsParityCount = 8;
+      final rsEncoded = rsEncodeMessage(utf8Bytes, rsParityCount);
+      final packet = <int>[_sfdByte, _sfdByte, utf8Bytes.length, ...rsEncoded, _efdByte, _efdByte];
       allChips.addAll(_chipStringToSignal(modulateTo4Ppm(packet)));
     }
+
+    debugPrint(
+      '  📡 ${allChips.length} total chips '
+      '(${(allChips.length * 66 / 1000).toStringAsFixed(1)}s TX time)',
+    );
+
     return allChips;
   }
 
-  /// Returns a human-readable label for each byte position in the packet.
   static String _formatByteLabel(
     int byteIdx,
     List<int> packet,
     int messageLength,
   ) {
-    if (byteIdx == 0) return 'Preamble (${_toBinary(packet[byteIdx])})';
-    if (byteIdx == 1) return 'Length   (${_toBinary(packet[byteIdx])})';
+    if (byteIdx <= 1) return 'SFD[$byteIdx]   (${_toBinary(packet[byteIdx])})';
+    if (byteIdx == 2) return 'Length   (${_toBinary(packet[byteIdx])})';
 
-    final dataEnd = 2 + messageLength;
+    final dataEnd = 3 + messageLength;
     if (byteIdx < dataEnd) {
-      return 'Data[${byteIdx - 2}]  (${_toBinary(packet[byteIdx])})';
+      return 'Data[${byteIdx - 3}]  (${_toBinary(packet[byteIdx])})';
     }
-    return 'Parity[${byteIdx - dataEnd}](${_toBinary(packet[byteIdx])})';
+    final parityEnd = dataEnd + 8;
+    if (byteIdx < parityEnd) {
+      return 'Parity[${byteIdx - dataEnd}](${_toBinary(packet[byteIdx])})';
+    }
+    return 'EFD[${byteIdx - parityEnd}]  (${_toBinary(packet[byteIdx])})';
   }
 }

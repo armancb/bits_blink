@@ -3,8 +3,11 @@ import 'package:flutter/foundation.dart';
 import '../reed_solomon/galois_field.dart';
 import '../reed_solomon/reed_solomon.dart';
 
-/// Preamble byte (0xAA = 170) used to signal start of transmission.
-const int _preambleByte = 170;
+/// Start Frame Delimiter byte (0xAA = 170).
+const int _sfdByte = 0xAA;
+
+/// End Frame Delimiter byte (0x55 = 85).
+const int _efdByte = 0x55;
 
 /// Service that converts text into UTF-8 binary and applies
 /// Reed-Solomon encoding to each word with 1:1 parity ratio.
@@ -45,8 +48,8 @@ class EncoderService {
       final rsEncoded = rsEncodeMessage(utf8Bytes, messageLength);
       final parity = rsEncoded.sublist(messageLength);
 
-      // Step 3: Build final packet — [preamble][length][data + parity]
-      final packet = <int>[_preambleByte, messageLength, ...rsEncoded];
+      // Step 3: Build final packet — [SFD][SFD][length][data + parity][EFD][EFD]
+      final packet = <int>[_sfdByte, _sfdByte, messageLength, ...rsEncoded, _efdByte, _efdByte];
 
       // Step 4: Convert to binary
       final binaryStr = packet.map(_toBinary).join(' ');
@@ -54,7 +57,7 @@ class EncoderService {
       debugPrint('  Word       : "$word"');
       debugPrint('  UTF-8      : $utf8Bytes');
       debugPrint('  RS Parity  : $parity  (${parity.length} symbols)');
-      debugPrint('  Preamble   : $_preambleByte (${_toBinary(_preambleByte)})');
+      debugPrint('  SFD        : 0xAA 0xAA (${_toBinary(_sfdByte)} ${_toBinary(_sfdByte)})');
       debugPrint('  Length     : $messageLength bytes');
       debugPrint('  Packet     : $packet');
       debugPrint('  Binary     : $binaryStr');

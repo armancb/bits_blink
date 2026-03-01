@@ -71,7 +71,7 @@ List<int>? rsCorrectMessage(List<int> messageIn, int nsym) {
 /// }
 /// ```
 List<int>? rsDecodePayload(List<int> demodulatedBytes, int dataLength) {
-  final int nsym = dataLength; // 1:1 parity ratio
+  const int nsym = 8; // Fixed 8 parity symbols (matching TX)
   final corrected = rsCorrectMessage(demodulatedBytes, nsym);
   if (corrected == null) return null;
   // Strip parity — return only the first dataLength bytes.
