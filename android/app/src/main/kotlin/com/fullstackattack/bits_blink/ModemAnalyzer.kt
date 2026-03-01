@@ -27,10 +27,19 @@ class ModemAnalyzer {
     private val GLOBAL_SCAN_STEP = 16
 
     /** Half-width of the local tracking search box (pixels). */
-    private val LOCAL_TRACK_RADIUS = 50
+    private val LOCAL_TRACK_RADIUS = 30  // Tight radius — expect minimal movement
 
-    /** If the brightest pixel in the local box falls below this, lose lock. */
-    private val LOCK_LOSS_THRESHOLD = 40
+    /** Brightness needed to ACQUIRE lock (initial lock-on).
+     *  A phone flashlight at arm's length is ~200+. Ambient room light is ~40-80. */
+    private val LOCK_ACQUIRE_THRESHOLD = 140
+
+    /** Peak spot brightness must exceed frame average by this margin to qualify.
+     *  Rejects diffuse ambient (windows, room lights). Flashlight is very concentrated. */
+    private val CONTRAST_MARGIN = 50
+
+    /** How many consecutive dark frames before we give up and re-scan.
+     *  At 30fps: 60 frames = ~2 seconds of no signal. Prevents re-lock during 0-chips. */
+    private val UNLOCK_AFTER_DARK_FRAMES = 60
 
     /** Width of the 1D waveform extraction box (pixels). Narrow = focused signal. */
     private val EXTRACT_WIDTH = 60
@@ -60,6 +69,9 @@ class ModemAnalyzer {
     /** Whether we have a stable lock on the light source. */
     var isLocked: Boolean = false
         private set
+
+    /** Consecutive dark frames since last bright detection. Used for timeout unlock. */
+    private var darkFrameCount: Int = 0
 
     // ═══════════════════════════════════════════════════════════════
     // ██  MAIN ENTRY POINT                                       ██
@@ -101,26 +113,55 @@ class ModemAnalyzer {
             }
         }
 
-        // ── 2. ROI Tracking ──
+        // ── 2. ROI TRACKING (Sticky positional lock) ──
+        //
+        // Design: Position is locked once acquired. During dark chips (0-bits),
+        // the flashlight turns OFF but we MUST NOT re-scan or drift to ambient.
+        // We stay at last known position and only unlock after UNLOCK_AFTER_DARK_FRAMES
+        // consecutive dark frames (~2s) to detect end of transmission / source moved.
+
+        // Sample brightness at current locked position (or whole frame if not locked)
+        val spotBrightness: Int
         val maxBrightness: Int
+
         if (!isLocked) {
-            // ── GLOBAL SCAN: find the brightest cluster across the whole frame ──
+            // ── GLOBAL SCAN: find the brightest concentrated spot ──
             val result = globalScan(yBytes, width, height)
-            lastRoiCenterX = result.first
-            lastRoiCenterY = result.second
-            maxBrightness = result.third
-            // Lock on if we found something bright enough
-            isLocked = maxBrightness >= LOCK_LOSS_THRESHOLD
-        } else {
-            // ── LOCAL TRACKING: search only near the last known position ──
-            val result = localTrack(yBytes, width, height, lastRoiCenterX, lastRoiCenterY)
-            lastRoiCenterX = result.first
-            lastRoiCenterY = result.second
-            maxBrightness = result.third
-            // ── LOCK LOSS: if brightness drops, unlock for a full re-scan ──
-            if (maxBrightness < LOCK_LOSS_THRESHOLD) {
-                isLocked = false
+            spotBrightness = result.third
+
+            // Must be bright AND concentrated (vs diffuse ambient light)
+            val frameAvg = frameAverageBrightness(yBytes, width, height)
+            val isConcentrated = spotBrightness - frameAvg >= CONTRAST_MARGIN
+
+            if (spotBrightness >= LOCK_ACQUIRE_THRESHOLD && isConcentrated) {
+                // Lock acquired — record position and reset dark counter
+                lastRoiCenterX = result.first
+                lastRoiCenterY = result.second
+                isLocked = true
+                darkFrameCount = 0
             }
+            maxBrightness = spotBrightness
+        } else {
+            // ── LOCAL TRACK: small refine when bright, freeze when dark ──
+            val localResult = localTrack(yBytes, width, height, lastRoiCenterX, lastRoiCenterY)
+            spotBrightness = localResult.third
+
+            if (spotBrightness >= LOCK_ACQUIRE_THRESHOLD / 2) {
+                // Light is ON: drift-correct position slightly toward the new peak
+                // Lerp: move 60% toward new peak to avoid jumping
+                lastRoiCenterX = ((lastRoiCenterX * 4 + localResult.first) / 5)
+                lastRoiCenterY = ((lastRoiCenterY * 4 + localResult.second) / 5)
+                darkFrameCount = 0
+            } else {
+                // Light is OFF (dark chip): freeze position, don't move ROI
+                darkFrameCount++
+                if (darkFrameCount >= UNLOCK_AFTER_DARK_FRAMES) {
+                    // 2+ seconds of darkness — assume source moved/gone, re-scan
+                    isLocked = false
+                    darkFrameCount = 0
+                }
+            }
+            maxBrightness = spotBrightness
         }
 
         // ── 3. 1D Waveform Extraction (row averaging) ──
@@ -244,6 +285,27 @@ class ModemAnalyzer {
             }
         }
         return Triple(bestX, bestY, bestVal / 3)
+    }
+
+    /**
+     * Fast estimate of the frame's average brightness.
+     * Samples every 32nd pixel for speed (~O(w*h/1024)).
+     * Used to detect concentrated vs diffuse light sources.
+     */
+    private fun frameAverageBrightness(yBytes: ByteArray, w: Int, h: Int): Int {
+        var sum = 0L
+        var count = 0
+        var y = 0
+        while (y < h) {
+            var x = 0
+            while (x < w) {
+                sum += (yBytes[y * w + x].toInt() and 0xFF)
+                count++
+                x += 32
+            }
+            y += 32
+        }
+        return if (count > 0) (sum / count).toInt() else 0
     }
 
     // ═══════════════════════════════════════════════════════════════

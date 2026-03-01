@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/decoder_service.dart';
 import '../theme/app_colors.dart';
+import 'chat_screen.dart';
 
 /// Live modem debugger — frame-level OOK with bits-to-text decode.
 class DebugCaptureScreen extends StatefulWidget {
@@ -164,26 +165,45 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.hudBackground,
+      backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text(
-          'MODEM DEBUGGER',
+          'MODEM RECEIVER',
           style: TextStyle(
             fontSize: 14,
             fontWeight: FontWeight.w700,
             letterSpacing: 2.0,
-            color: Colors.white70,
+            color: AppColors.primary,
           ),
         ),
-        backgroundColor: AppColors.hudBackground,
-        iconTheme: const IconThemeData(color: Colors.white70),
+        backgroundColor: Colors.white,
+        iconTheme: const IconThemeData(color: AppColors.primary),
         elevation: 0,
         actions: [
           IconButton(
-            icon: const Icon(Icons.delete_outline, size: 18),
+            icon: const Icon(
+              Icons.send_to_mobile,
+              size: 20,
+              color: AppColors.primary,
+            ),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const ChatScreen()),
+              );
+            },
+            tooltip: 'Open Transmitter',
+          ),
+          IconButton(
+            icon: const Icon(
+              Icons.delete_outline,
+              size: 20,
+              color: Colors.black54,
+            ),
             onPressed: _clearData,
             tooltip: 'Clear data',
           ),
+          const SizedBox(width: 8),
         ],
       ),
       body: Column(
@@ -229,6 +249,7 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
                       ? Colors.orange.shade700
                       : AppColors.primary,
                   foregroundColor: Colors.white,
+                  elevation: 0,
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(8),
                   ),
@@ -248,20 +269,36 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
             const SizedBox(width: 4),
             _buildTag(
               Icons.speed,
-              Colors.white54,
+              Colors.black54,
               '${_lastDecode!.chipWidth}f/c',
+              bg: const Color(0xFFEEEEEE),
             ),
             if (_lastDecode!.preambleFound) ...[
               const SizedBox(width: 4),
-              _buildTag(Icons.check, Colors.greenAccent, 'PRE'),
+              _buildTag(
+                Icons.check,
+                Colors.green.shade700,
+                'PRE',
+                bg: Colors.green.shade50,
+              ),
             ],
             if (_lastDecode!.syncFound) ...[
               const SizedBox(width: 4),
-              _buildTag(Icons.sync, Colors.cyanAccent, 'SYNC'),
+              _buildTag(
+                Icons.sync,
+                Colors.blue.shade700,
+                'SYNC',
+                bg: Colors.blue.shade50,
+              ),
             ],
             if (_lastDecode!.rsSuccess) ...[
               const SizedBox(width: 4),
-              _buildTag(Icons.shield, Colors.greenAccent, 'RS✓'),
+              _buildTag(
+                Icons.shield,
+                Colors.green.shade700,
+                'RS✓',
+                bg: Colors.green.shade50,
+              ),
             ],
           ],
         ],
@@ -269,25 +306,26 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
     );
   }
 
-  Widget _buildTag(IconData icon, Color color, String label) {
+  Widget _buildTag(IconData icon, Color color, String label, {Color? bg}) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.06),
-        borderRadius: BorderRadius.circular(5),
+        color: bg ?? const Color(0xFFF5F5F5),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: Colors.black.withOpacity(0.05)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, color: color, size: 9),
-          const SizedBox(width: 2),
+          Icon(icon, color: color, size: 10),
+          const SizedBox(width: 3),
           Text(
             label,
             style: TextStyle(
               fontFamily: 'monospace',
               color: color,
-              fontSize: 9,
-              fontWeight: FontWeight.w600,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
             ),
           ),
         ],
@@ -321,9 +359,9 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
           child: Container(
             height: 50,
             decoration: BoxDecoration(
-              color: Colors.black38,
+              color: const Color(0xFFF5F7FA),
               borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: Colors.white.withOpacity(0.06)),
+              border: Border.all(color: Colors.black.withOpacity(0.05)),
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(6),
@@ -368,13 +406,13 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.03),
+          color: Colors.white,
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.white.withOpacity(0.06)),
+          border: Border.all(color: Colors.black.withOpacity(0.05)),
         ),
         child: Row(
           children: [
-            const Icon(Icons.sensors, color: Colors.white24, size: 12),
+            const Icon(Icons.sensors, color: Colors.black26, size: 12),
             const SizedBox(width: 6),
             Expanded(
               child: Text(
@@ -382,7 +420,7 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
                 style: const TextStyle(
                   fontFamily: 'monospace',
                   fontSize: 10,
-                  color: Colors.white30,
+                  color: Colors.black45,
                 ),
               ),
             ),
@@ -396,8 +434,8 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
       return Container(
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
-          color: Colors.green.withOpacity(0.12),
-          border: Border.all(color: Colors.greenAccent.withOpacity(0.4)),
+          color: Colors.green.shade50,
+          border: Border.all(color: Colors.green.shade200),
           borderRadius: BorderRadius.circular(8),
         ),
         child: Column(
@@ -405,19 +443,19 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
           children: [
             Row(
               children: [
-                const Icon(
+                Icon(
                   Icons.check_circle,
-                  color: Colors.greenAccent,
+                  color: Colors.green.shade700,
                   size: 14,
                 ),
                 const SizedBox(width: 6),
-                const Text(
+                Text(
                   'DECODED',
                   style: TextStyle(
                     fontFamily: 'monospace',
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
-                    color: Colors.greenAccent,
+                    color: Colors.green.shade700,
                     letterSpacing: 1.5,
                   ),
                 ),
@@ -427,7 +465,7 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
                   style: const TextStyle(
                     fontFamily: 'monospace',
                     fontSize: 10,
-                    color: Colors.white38,
+                    color: Colors.black38,
                   ),
                 ),
               ],
@@ -437,16 +475,17 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
               width: double.infinity,
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.black38,
+                color: Colors.white,
                 borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: Colors.black.withOpacity(0.05)),
               ),
               child: Text(
                 result.decodedText!,
-                style: const TextStyle(
+                style: TextStyle(
                   fontFamily: 'monospace',
                   fontSize: 22,
                   fontWeight: FontWeight.w700,
-                  color: Colors.greenAccent,
+                  color: Colors.green.shade800,
                 ),
               ),
             ),
@@ -456,7 +495,7 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
               style: const TextStyle(
                 fontFamily: 'monospace',
                 fontSize: 10,
-                color: Colors.white38,
+                color: Colors.black54,
               ),
             ),
             const SizedBox(height: 4),
@@ -471,14 +510,12 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
     return Container(
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: result.preambleFound
-            ? Colors.yellow.withOpacity(0.06)
-            : Colors.white.withOpacity(0.03),
+        color: result.preambleFound ? Colors.orange.shade50 : Colors.white,
         borderRadius: BorderRadius.circular(6),
         border: Border.all(
           color: result.preambleFound
-              ? Colors.yellowAccent.withOpacity(0.2)
-              : Colors.white.withOpacity(0.06),
+              ? Colors.orange.shade200
+              : Colors.black.withOpacity(0.05),
         ),
       ),
       child: Column(
@@ -489,8 +526,8 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
               Icon(
                 result.preambleFound ? Icons.sync : Icons.sensors,
                 color: result.preambleFound
-                    ? Colors.yellowAccent
-                    : Colors.white30,
+                    ? Colors.orange.shade700
+                    : Colors.black26,
                 size: 12,
               ),
               const SizedBox(width: 6),
@@ -501,8 +538,8 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
                     fontFamily: 'monospace',
                     fontSize: 10,
                     color: result.preambleFound
-                        ? Colors.yellowAccent
-                        : Colors.white30,
+                        ? Colors.orange.shade800
+                        : Colors.black45,
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -512,7 +549,7 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
                 style: const TextStyle(
                   fontFamily: 'monospace',
                   fontSize: 10,
-                  color: Colors.white24,
+                  color: Colors.black26,
                 ),
               ),
             ],
@@ -548,8 +585,9 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
     return Container(
       padding: const EdgeInsets.all(6),
       decoration: BoxDecoration(
-        color: Colors.black26,
+        color: const Color(0xFFF5F7FA),
         borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: Colors.black.withOpacity(0.05)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -560,7 +598,7 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
               fontFamily: 'monospace',
               fontSize: 8,
               fontWeight: FontWeight.w700,
-              color: Colors.white.withOpacity(0.25),
+              color: Colors.black38,
               letterSpacing: 1.5,
             ),
           ),
@@ -578,8 +616,8 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
                       fontFamily: 'monospace',
                       fontSize: 8,
                       color: charResults[i] != '·'
-                          ? Colors.cyanAccent.withOpacity(0.7)
-                          : Colors.white24,
+                          ? AppColors.primary
+                          : Colors.black26,
                     ),
                   ),
                   Text(
@@ -589,8 +627,8 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
                       fontSize: 10,
                       fontWeight: FontWeight.w700,
                       color: charResults[i] != '·'
-                          ? Colors.cyanAccent
-                          : Colors.white24,
+                          ? AppColors.primary
+                          : Colors.black26,
                     ),
                   ),
                 ],
@@ -605,9 +643,9 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
   Widget _buildBitFeed() {
     return Container(
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.4),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: Colors.white.withOpacity(0.06)),
+        border: Border.all(color: Colors.black.withOpacity(0.05)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -616,11 +654,11 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
             padding: const EdgeInsets.fromLTRB(8, 5, 8, 2),
             child: Text(
               'FRAME OOK FEED (${_bitFeedLog.length} entries)',
-              style: TextStyle(
+              style: const TextStyle(
                 fontFamily: 'monospace',
                 fontSize: 8,
                 fontWeight: FontWeight.w700,
-                color: Colors.white.withOpacity(0.25),
+                color: Colors.black38,
                 letterSpacing: 1.5,
               ),
             ),
@@ -640,7 +678,7 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
                     style: TextStyle(
                       fontFamily: 'monospace',
                       fontSize: 9,
-                      color: isBright ? Colors.greenAccent : Colors.white24,
+                      color: isBright ? Colors.green.shade700 : Colors.black26,
                       fontWeight: isBright ? FontWeight.w600 : FontWeight.w400,
                     ),
                   ),
@@ -660,8 +698,9 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
       height: 16,
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.5),
+        color: const Color(0xFFEEEEEE),
         borderRadius: BorderRadius.circular(3),
+        border: Border.all(color: Colors.black.withOpacity(0.05)),
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(3),
@@ -670,9 +709,7 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
               .map(
                 (b) => Expanded(
                   child: Container(
-                    color: b
-                        ? const Color(0xFF4CAF50)
-                        : const Color(0xFF1A1A1A),
+                    color: b ? const Color(0xFF4CAF50) : Colors.transparent,
                   ),
                 ),
               )
@@ -707,12 +744,12 @@ class _DebugCaptureScreenState extends State<DebugCaptureScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.sensors, color: Colors.white.withOpacity(0.15), size: 64),
+          Icon(Icons.sensors, color: Colors.black.withOpacity(0.05), size: 64),
           const SizedBox(height: 12),
           Text(
             'Tap START to begin\noptical modem debug',
             style: TextStyle(
-              color: Colors.white.withOpacity(0.3),
+              color: Colors.black.withOpacity(0.3),
               fontSize: 14,
               fontFamily: 'monospace',
             ),
