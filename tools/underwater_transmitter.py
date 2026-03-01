@@ -149,114 +149,106 @@ class UnderwaterTransmitter:
         self.alive = False
         self.root.destroy()
 
-    def _generate_particles(self, w, h, count=200):
-        self.particles = []
-        for _ in range(count):
-            x = random.randint(0, w)
-            y = random.randint(0, h)
-            size = random.uniform(1.5, 5)
-            drift = random.uniform(0.3, 1.0)
-            self.particles.append((x, y, size, drift))
-
-    def _draw_underwater(self, w, h, beam_on):
-        if not self.alive or self.canvas is None:
-            return
-        try:
-            self.canvas.delete('all')
-        except tk.TclError:
-            self.alive = False
-            return
-
+    def _setup_scene(self, w, h):
+        self.canvas.delete('all')
         cx, cy = w // 2, h // 2
         max_dim = max(w, h)
 
-        if beam_on:
-            # ── BEAM ON: big, smooth, bright scattered blob ──
+        # 1. Dark ambient particles (beam OFF state)
+        for _ in range(250):
+            if random.random() < 0.25:
+                px = random.randint(0, w)
+                py = random.randint(0, h)
+                drift = random.uniform(0.3, 1.0)
+                size = random.uniform(1.5, 5)
+                dim = int(25 * drift)
+                col = f'#{dim:02x}{dim+8:02x}{dim+8:02x}'
+                self.canvas.create_oval(px-size*0.4, py-size*0.4,
+                                        px+size*0.4, py+size*0.4,
+                                        fill=col, outline='', tags='off_part')
 
-            # Smooth gradient: many concentric ovals from edge to center
-            # Cover the full screen with the outer glow
-            num_rings = 25
-            max_radius = int(max_dim * 0.7)  # blob covers ~70% of screen
+        # 2. BEAM ON: 80 rings for ultra-smooth gradient!
+        num_rings = 80
+        max_radius = int(max_dim * 0.7)
 
-            for i in range(num_rings):
-                frac = i / num_rings  # 0 = outermost, 1 = innermost
-                radius = int(max_radius * (1 - frac))
-                if radius < 5:
-                    continue
+        for i in range(num_rings):
+            frac = i / num_rings
+            radius = int(max_radius * (1 - frac))
+            if radius < 5:
+                continue
 
-                # Smooth brightness curve (quadratic ramp-up toward center)
-                brightness = frac * frac  # quadratic = smoother than linear
+            # Cubic curve perfectly blends the 80 rings
+            brightness = frac * frac * frac
 
-                # Blue-green tinted light (underwater absorption)
-                r = int(140 * brightness + 30)
-                g = int(255 * brightness + 40)
-                b = int(230 * brightness + 40)
-                r = min(r, 255)
-                g = min(g, 255)
-                b = min(b, 255)
-                color = f'#{r:02x}{g:02x}{b:02x}'
+            r = int(140 * brightness + 30)
+            g = int(255 * brightness + 40)
+            b = int(230 * brightness + 40)
+            color = f'#{min(r, 255):02x}{min(g, 255):02x}{min(b, 255):02x}'
 
-                # Slight wobble for organic feel
-                jx = random.randint(-2, 2)
-                jy = random.randint(-2, 2)
+            jx = random.randint(-1, 1)
+            jy = random.randint(-1, 1)
 
-                self.canvas.create_oval(
-                    cx - radius + jx, cy - radius + jy,
-                    cx + radius + jx, cy + radius + jy,
-                    fill=color, outline='')
-
-            # Bright core — large and prominent
-            core_r = int(max_dim * 0.12)
-            jr = random.randint(-2, 2)
             self.canvas.create_oval(
-                cx - core_r + jr, cy - core_r,
-                cx + core_r + jr, cy + core_r,
-                fill='#bbffee', outline='')
+                cx - radius + jx, cy - radius + jy,
+                cx + radius + jx, cy + radius + jy,
+                fill=color, outline='', tags='beam')
 
-            # Inner hotspot
-            hot_r = int(max_dim * 0.05)
-            self.canvas.create_oval(
-                cx - hot_r, cy - hot_r,
-                cx + hot_r, cy + hot_r,
-                fill='#ddfff8', outline='')
+        # Bright core
+        core_r = int(max_dim * 0.12)
+        self.canvas.create_oval(
+            cx - core_r, cy - core_r,
+            cx + core_r, cy + core_r,
+            fill='#bbffee', outline='', tags='beam')
 
-            # Caustic rays — longer, thinner
-            for _ in range(12):
-                angle = random.uniform(0, 2 * math.pi)
-                length = random.randint(int(max_dim * 0.15), int(max_dim * 0.45))
-                x1 = cx + int(30 * math.cos(angle))
-                y1 = cy + int(30 * math.sin(angle))
-                x2 = cx + int(length * math.cos(angle))
-                y2 = cy + int(length * math.sin(angle))
-                self.canvas.create_line(x1, y1, x2, y2,
-                                        fill='#66eebb', width=1, stipple='gray50')
+        # Inner hotspot
+        hot_r = int(max_dim * 0.05)
+        self.canvas.create_oval(
+            cx - hot_r, cy - hot_r,
+            cx + hot_r, cy + hot_r,
+            fill='#ddfff8', outline='', tags='beam')
 
-            # Illuminated particles
-            for (px, py, size, drift) in self.particles:
-                dist = math.sqrt((px - cx)**2 + (py - cy)**2)
-                if dist < max_radius:
-                    brightness = (1 - dist / max_radius) * drift
-                    if brightness > 0.1:
-                        gv = int(220 * brightness)
-                        bv = int(200 * brightness)
-                        rv = int(150 * brightness)
-                        col = f'#{min(rv,255):02x}{min(gv,255):02x}{min(bv,255):02x}'
-                        s = size * (0.8 + brightness * 0.6)
-                        self.canvas.create_oval(px-s, py-s, px+s, py+s,
-                                                fill=col, outline='')
+        # Caustic rays
+        for _ in range(16):
+            angle = random.uniform(0, 2 * math.pi)
+            length = random.randint(int(max_dim * 0.15), int(max_dim * 0.45))
+            x1 = cx + int(30 * math.cos(angle))
+            y1 = cy + int(30 * math.sin(angle))
+            x2 = cx + int(length * math.cos(angle))
+            y2 = cy + int(length * math.sin(angle))
+            self.canvas.create_line(x1, y1, x2, y2,
+                                    fill='#66eebb', width=1, stipple='gray50', tags='beam')
 
-        else:
-            # ── BEAM OFF: dark water ──
-            # Dark background already set by canvas bg
-            for (px, py, size, drift) in self.particles:
-                if random.random() < 0.25:
-                    dim = int(25 * drift)
-                    col = f'#{dim:02x}{dim+8:02x}{dim+8:02x}'
-                    self.canvas.create_oval(px-size*0.4, py-size*0.4,
-                                            px+size*0.4, py+size*0.4,
-                                            fill=col, outline='')
+        # Illuminated particles
+        for _ in range(250):
+            px = random.randint(0, w)
+            py = random.randint(0, h)
+            dist = math.sqrt((px - cx)**2 + (py - cy)**2)
+            if dist < max_radius:
+                drift = random.uniform(0.3, 1.0)
+                brightness = (1 - dist / max_radius) * drift
+                if brightness > 0.05:
+                    gv = int(220 * brightness)
+                    bv = int(200 * brightness)
+                    rv = int(150 * brightness)
+                    col = f'#{min(rv,255):02x}{min(gv,255):02x}{min(bv,255):02x}'
+                    s = random.uniform(1.5, 5) * (0.8 + brightness * 0.6)
+                    self.canvas.create_oval(px-s, py-s, px+s, py+s,
+                                            fill=col, outline='', tags='beam')
 
+        # Initial state: beam off
+        self.canvas.itemconfigure('beam', state='hidden')
+        self.canvas.update()
+
+    def _set_beam(self, on):
+        if not self.alive or self.canvas is None:
+            return
         try:
+            if on:
+                self.canvas.itemconfigure('beam', state='normal')
+                self.canvas.itemconfigure('off_part', state='hidden')
+            else:
+                self.canvas.itemconfigure('beam', state='hidden')
+                self.canvas.itemconfigure('off_part', state='normal')
             self.canvas.update()
         except tk.TclError:
             self.alive = False
@@ -288,23 +280,24 @@ class UnderwaterTransmitter:
         self.canvas = tk.Canvas(self.root, width=w, height=h,
                                 bg=DEEP_WATER, highlightthickness=0)
         self.canvas.place(x=0, y=0, relwidth=1, relheight=1)
-        self._generate_particles(w, h, 250)
-        self.root.update()
+        
+        # Pre-generate all visual elements! O(1) rendering at runtime!
+        self._setup_scene(w, h)
         time.sleep(0.2)
 
         # 500ms dark lead-in
-        self._draw_underwater(w, h, beam_on=False)
+        self._set_beam(False)
         self._busy_wait(0.5)
 
         # Flash each chip
         for chip in chips:
             if not self.alive:
                 break
-            self._draw_underwater(w, h, beam_on=(chip == 1))
+            self._set_beam(chip == 1)
             self._busy_wait(chip_sec)
 
         # 500ms dark tail
-        self._draw_underwater(w, h, beam_on=False)
+        self._set_beam(False)
         self._busy_wait(0.5)
 
         # Restore
@@ -326,7 +319,6 @@ class UnderwaterTransmitter:
         end = time.perf_counter() + seconds
         while time.perf_counter() < end:
             pass
-
 
 if __name__ == '__main__':
     UnderwaterTransmitter()
