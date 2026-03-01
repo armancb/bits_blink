@@ -231,27 +231,24 @@ private class SingleFrameDelegate: NSObject, AVCaptureVideoDataOutputSampleBuffe
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    // Set up the method channel on the root FlutterViewController.
-    if let controller = window?.rootViewController as? FlutterViewController {
-      let modemChannel = FlutterMethodChannel(
-        name: channelName,
-        binaryMessenger: controller.binaryMessenger
-      )
-
-      modemChannel.setMethodCallHandler { [weak self] (call, result) in
-        guard call.method == "transmit" else {
-          result(FlutterMethodNotImplemented)
-          return
-        }
-        self?.handleTransmit(call: call, result: result)
-      }
-    }
-
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+
+    // Register the modem method channel via the plugin registry (avoids
+    // the deprecation warning from accessing rootViewController at launch).
+    let messenger = engineBridge.pluginRegistry.messenger(for: channelName)
+    let modemChannel = FlutterMethodChannel(name: channelName, binaryMessenger: messenger)
+
+    modemChannel.setMethodCallHandler { [weak self] (call, result) in
+      guard call.method == "transmit" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      self?.handleTransmit(call: call, result: result)
+    }
   }
 
   // MARK: - Transmit handler
