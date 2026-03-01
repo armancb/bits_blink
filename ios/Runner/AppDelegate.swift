@@ -3,6 +3,7 @@ import UIKit
 import AVFoundation
 
 @main
+<<<<<<< HEAD
 @objc class AppDelegate: FlutterAppDelegate {
 
     private var captureSession: AVCaptureSession?
@@ -222,4 +223,84 @@ private class SingleFrameDelegate: NSObject, AVCaptureVideoDataOutputSampleBuffe
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         handler(pixelBuffer)
     }
+=======
+@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+  private let channelName = "bitsblink/modem"
+
+  override func application(
+    _ application: UIApplication,
+    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+  ) -> Bool {
+    // Set up the method channel on the root FlutterViewController.
+    if let controller = window?.rootViewController as? FlutterViewController {
+      let modemChannel = FlutterMethodChannel(
+        name: channelName,
+        binaryMessenger: controller.binaryMessenger
+      )
+
+      modemChannel.setMethodCallHandler { [weak self] (call, result) in
+        guard call.method == "transmit" else {
+          result(FlutterMethodNotImplemented)
+          return
+        }
+        self?.handleTransmit(call: call, result: result)
+      }
+    }
+
+    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+  }
+
+  // MARK: - Transmit handler
+
+  /// Receives a `List<bool>` signal from Dart and toggles the torch accordingly.
+  private func handleTransmit(call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard
+      let args = call.arguments as? [String: Any],
+      let signal = args["signal"] as? [Bool]
+    else {
+      result(
+        FlutterError(
+          code: "BAD_ARGS",
+          message: "Missing 'signal' argument",
+          details: nil
+        )
+      )
+      return
+    }
+
+    // Fire-and-forget: return success immediately, blink on a background thread.
+    result(nil)
+
+    DispatchQueue.global(qos: .userInitiated).async {
+      guard
+        let device = AVCaptureDevice.default(for: .video),
+        device.hasTorch
+      else {
+        NSLog("BITSBlink: No torch available on this device")
+        return
+      }
+
+      do {
+        try device.lockForConfiguration()
+
+        defer {
+          // Safety: always turn the torch OFF when done.
+          device.torchMode = .off
+          device.unlockForConfiguration()
+        }
+
+        for state in signal {
+          device.torchMode = state ? .on : .off
+          Thread.sleep(forTimeInterval: 0.015)  // 15 ms per chip
+        }
+      } catch {
+        NSLog("BITSBlink: Transmit error: \(error.localizedDescription)")
+      }
+    }
+  }
+>>>>>>> c76fb6c ("feat: iOS build succeeded, ready for transmitter logic")
 }
